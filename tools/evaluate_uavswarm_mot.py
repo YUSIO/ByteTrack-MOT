@@ -124,13 +124,16 @@ def trackeval_data(gt_frames, tracker_frames):
 def serialise_mot_row(row):
     result = {}
     for field in MOT_FIELDS:
-        value = row[field]
+        value = float(row[field])
+        if not np.isfinite(value):
+            result[field] = None
+            continue
         if field in COUNT_FIELDS:
             result[field] = int(value)
         elif field in RATE_FIELDS:
-            result[field] = round(100.0 * float(value), 6)
+            result[field] = round(100.0 * value, 6)
         else:
-            result[field] = round(float(value), 6)
+            result[field] = round(value, 6)
     return result
 
 
