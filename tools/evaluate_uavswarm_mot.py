@@ -45,7 +45,6 @@ MOT_FIELDS = [
     "num_switches",
     "num_fragmentations",
     "mota",
-    "motp",
     "num_objects",
     "num_predictions",
 ]
@@ -183,7 +182,7 @@ def main():
             "hota": serialise_hota_result(hota_by_sequence[sequence_name], hota_metric),
         }
     output = {
-        "units": {"rates": "percent", "counts": "events or detections", "motp": "IoU distance (lower is better)"},
+        "units": {"rates": "percent", "counts": "events or detections"},
         "protocol": {
             "clear_and_identity_iou_threshold": args.iou_threshold,
             "hota_implementation": "TrackEval 1.1.0 HOTA over IoU thresholds 0.05 through 0.95",
@@ -195,7 +194,7 @@ def main():
         "per_sequence": per_sequence,
     }
     with args.output.open("w") as destination:
-        json.dump(output, destination, indent=2, sort_keys=True)
+        json.dump(output, destination, indent=2, sort_keys=True, allow_nan=False)
         destination.write("\n")
 
 
