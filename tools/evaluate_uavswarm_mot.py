@@ -10,6 +10,12 @@ import motmetrics as mm
 import numpy as np
 from trackeval.metrics import HOTA
 
+# motmetrics 1.4.0 still calls np.asfarray, which NumPy 2 removed.  The old
+# function's default behavior is exactly np.asarray(..., dtype=float), so this
+# local evaluator compatibility alias does not change any distance computation.
+if not hasattr(np, "asfarray"):
+    np.asfarray = lambda values, dtype=float: np.asarray(values, dtype=dtype)
+
 
 COUNT_FIELDS = {
     "num_unique_objects",
