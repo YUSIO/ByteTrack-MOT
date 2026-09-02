@@ -23,6 +23,15 @@ from yolox.tracker.byte_tracker import BYTETracker
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument(
+        "--detections-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing one <sequence>/det.txt file per sequence. "
+            "When omitted, uses <dataset-root>/<split>/<sequence>/det/det.txt."
+        ),
+    )
     parser.add_argument("--split", choices=("test", "train"), default="test")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--track-thresh", type=float, default=0.6)
@@ -73,7 +82,13 @@ def write_sequence_results(path, rows):
 
 def track_sequence(sequence_dir, output_dir, args):
     info = read_sequence_info(sequence_dir)
-    detections = load_detections(sequence_dir / "det" / "det.txt")
+    if args.detections_root is None:
+        detection_path = sequence_dir / "det" / "det.txt"
+    else:
+        detection_path = args.detections_root / info["name"] / "det.txt"
+    if not detection_path.is_file():
+        raise FileNotFoundError(f"missing detector cache for {info['name']}: {detection_path}")
+    detections = load_detections(detection_path)
     BaseTrack._count = 0
     tracker = BYTETracker(args, frame_rate=info["frame_rate"])
     result_rows = []
@@ -123,6 +138,7 @@ def main():
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
             "mot20": args.mot20,
         },
+        "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,
         "totals": {
             "input_detection_rows": sum(item["input_detection_rows"] for item in summaries),
