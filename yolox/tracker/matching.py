@@ -90,6 +90,63 @@ def iou_distance(atracks, btracks):
 
     return cost_matrix
 
+
+def dious(atlbrs, btlbrs):
+    """Compute pairwise Distance-IoU similarity for ``tlbr`` boxes.
+
+    DIoU augments IoU with the normalized squared center distance inside the
+    smallest enclosing box.  The returned similarity is
+    ``IoU - rho(center_a, center_b)^2 / c^2``.
+    """
+    if len(atlbrs) == 0 or len(btlbrs) == 0:
+        return np.zeros((len(atlbrs), len(btlbrs)), dtype=float)
+
+    a = np.asarray(atlbrs, dtype=float).reshape(-1, 4)
+    b = np.asarray(btlbrs, dtype=float).reshape(-1, 4)
+
+    inter_x1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    inter_y1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    inter_x2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    inter_y2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter_w = np.maximum(0.0, inter_x2 - inter_x1)
+    inter_h = np.maximum(0.0, inter_y2 - inter_y1)
+    intersection = inter_w * inter_h
+
+    area_a = np.maximum(0.0, a[:, 2] - a[:, 0]) * np.maximum(0.0, a[:, 3] - a[:, 1])
+    area_b = np.maximum(0.0, b[:, 2] - b[:, 0]) * np.maximum(0.0, b[:, 3] - b[:, 1])
+    union = area_a[:, None] + area_b[None, :] - intersection
+    iou = np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
+
+    center_a = (a[:, :2] + a[:, 2:]) / 2.0
+    center_b = (b[:, :2] + b[:, 2:]) / 2.0
+    center_distance = np.sum((center_a[:, None, :] - center_b[None, :, :]) ** 2, axis=2)
+
+    enclosing_x1 = np.minimum(a[:, None, 0], b[None, :, 0])
+    enclosing_y1 = np.minimum(a[:, None, 1], b[None, :, 1])
+    enclosing_x2 = np.maximum(a[:, None, 2], b[None, :, 2])
+    enclosing_y2 = np.maximum(a[:, None, 3], b[None, :, 3])
+    enclosing_diagonal = (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2
+    penalty = np.divide(
+        center_distance,
+        enclosing_diagonal,
+        out=np.zeros_like(center_distance),
+        where=enclosing_diagonal > 0,
+    )
+    return iou - penalty
+
+
+def diou_distance(atracks, btracks):
+    """Compute cost as ``1 - DIoU`` for tracks/detections or ``tlbr`` arrays."""
+    if (len(atracks) > 0 and isinstance(atracks[0], np.ndarray)) or (
+        len(btracks) > 0 and isinstance(btracks[0], np.ndarray)
+    ):
+        atlbrs = atracks
+        btlbrs = btracks
+    else:
+        atlbrs = [track.tlbr for track in atracks]
+        btlbrs = [track.tlbr for track in btracks]
+    return 1.0 - dious(atlbrs, btlbrs)
+
 def v_iou_distance(atracks, btracks):
     """
     Compute cost based on IoU
