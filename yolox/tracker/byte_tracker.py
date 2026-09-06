@@ -5,14 +5,112 @@ import os.path as osp
 import copy
 import torch
 import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
 from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 
+
+def _clone_topology(topology):
+    if topology is None:
+        return None
+    return np.asarray(topology, dtype=np.float32).copy()
+
+
+def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2):
+    """Build per-detection local topology descriptors.
+
+    Each descriptor contains rows ``[normalized_distance, sin(theta),
+    cos(theta)]`` for the nearest detections in the same frame.  The
+    descriptor is intentionally identity-free: a candidate detection is
+    compared with a stored track descriptor through a Hungarian assignment
+    over neighbor relations.
+    """
+    boxes = np.asarray(boxes, dtype=np.float32)
+    count = len(boxes)
+    if count == 0:
+        return []
+    centers = np.column_stack(
+        ((boxes[:, 0] + boxes[:, 2]) * 0.5, (boxes[:, 1] + boxes[:, 3]) * 0.5)
+    ).astype(np.float32)
+    descriptors = []
+    for index, center in enumerate(centers):
+        delta = centers - center
+        distances = np.linalg.norm(delta, axis=1)
+        distances[index] = np.inf
+        order = np.argsort(distances)
+        order = order[np.isfinite(distances[order])]
+        order = order[:max_neighbors]
+        if len(order) < min_neighbors:
+            descriptors.append(None)
+            continue
+
+        selected_distances = distances[order]
+        scale = max(float(np.max(selected_distances)), 1e-6)
+        selected_delta = delta[order]
+        safe_distances = np.maximum(selected_distances, 1e-6)
+        descriptors.append(
+            np.column_stack(
+                (
+                    selected_distances / scale,
+                    selected_delta[:, 1] / safe_distances,
+                    selected_delta[:, 0] / safe_distances,
+                )
+            ).astype(np.float32)
+        )
+    return descriptors
+
+
+def local_topology_cost(track_topology, detection_topology, alpha=0.6):
+    """Compare two local topology descriptors with Hungarian matching."""
+    if track_topology is None or detection_topology is None:
+        return None
+    track_topology = np.asarray(track_topology, dtype=np.float32)
+    detection_topology = np.asarray(detection_topology, dtype=np.float32)
+    if track_topology.ndim != 2 or detection_topology.ndim != 2:
+        return None
+    if len(track_topology) == 0 or len(detection_topology) == 0:
+        return None
+
+    distance_cost = np.abs(
+        track_topology[:, None, 0] - detection_topology[None, :, 0]
+    )
+    direction_dot = np.sum(
+        track_topology[:, None, 1:3] * detection_topology[None, :, 1:3], axis=2
+    )
+    direction_cost = 0.5 * (1.0 - np.clip(direction_dot, -1.0, 1.0))
+    pair_cost = alpha * distance_cost + (1.0 - alpha) * direction_cost
+
+    rows, columns = linear_sum_assignment(pair_cost)
+    unmatched = max(len(track_topology), len(detection_topology)) - len(rows)
+    return float((pair_cost[rows, columns].sum() + unmatched) / max(len(track_topology), len(detection_topology)))
+
+
+def topology_fused_cost(iou_cost, tracks, detections, alpha=0.6, topology_lambda=0.30):
+    """Fuse topology with IoU only where both local descriptors are valid."""
+    fused = np.asarray(iou_cost, dtype=np.float32).copy()
+    if fused.size == 0:
+        return fused
+    topology_lambda = float(np.clip(topology_lambda, 0.0, 1.0))
+    for track_index, track in enumerate(tracks):
+        for detection_index, detection in enumerate(detections):
+            topology_cost = local_topology_cost(
+                getattr(track, "topology", None),
+                getattr(detection, "topology", None),
+                alpha=alpha,
+            )
+            if topology_cost is None:
+                continue
+            fused[track_index, detection_index] = (
+                (1.0 - topology_lambda) * fused[track_index, detection_index]
+                + topology_lambda * topology_cost
+            )
+    return fused
+
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, topology=None):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -22,6 +120,13 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.topology = _clone_topology(topology)
+        self.topology_frame_id = None
+
+    def update_topology(self, topology, frame_id):
+        if topology is not None:
+            self.topology = _clone_topology(topology)
+            self.topology_frame_id = frame_id
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -55,6 +160,8 @@ class STrack(BaseTrack):
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        if self.topology is not None:
+            self.topology_frame_id = frame_id
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -67,6 +174,7 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self.update_topology(new_track.topology, frame_id)
 
     def update(self, new_track, frame_id):
         """
@@ -86,6 +194,7 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        self.update_topology(new_track.topology, frame_id)
 
     @property
     # @jit(nopython=True)
@@ -155,6 +264,11 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        self.topology_enabled = bool(getattr(args, "topology", False))
+        self.topology_kmax = int(getattr(args, "topology_kmax", 8))
+        self.topology_kmin = int(getattr(args, "topology_kmin", 2))
+        self.topology_alpha = float(getattr(args, "topology_alpha", 0.6))
+        self.topology_lambda = float(getattr(args, "topology_lambda", 0.30))
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -179,6 +293,19 @@ class BYTETracker(object):
         inds_high = scores < self.args.track_thresh
 
         inds_second = np.logical_and(inds_low, inds_high)
+        if self.topology_enabled:
+            topology_indices = np.flatnonzero(inds_low)
+            topology_descriptors = build_local_topologies(
+                bboxes[inds_low],
+                max_neighbors=self.topology_kmax,
+                min_neighbors=self.topology_kmin,
+            )
+            topology_by_detection_index = {
+                int(index): descriptor
+                for index, descriptor in zip(topology_indices, topology_descriptors)
+            }
+        else:
+            topology_by_detection_index = {}
         dets_second = bboxes[inds_second]
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
@@ -186,8 +313,15 @@ class BYTETracker(object):
 
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            detection_indices = np.flatnonzero(remain_inds)
+            detections = [
+                STrack(
+                    STrack.tlbr_to_tlwh(tlbr),
+                    score,
+                    topology=topology_by_detection_index.get(int(index)),
+                )
+                for index, tlbr, score in zip(detection_indices, dets, scores_keep)
+            ]
         else:
             detections = []
 
@@ -223,12 +357,29 @@ class BYTETracker(object):
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
+            detection_indices_second = np.flatnonzero(inds_second)
+            detections_second = [
+                STrack(
+                    STrack.tlbr_to_tlwh(tlbr),
+                    score,
+                    topology=topology_by_detection_index.get(int(index)),
+                )
+                for index, tlbr, score in zip(
+                    detection_indices_second, dets_second, scores_second
+                )
+            ]
         else:
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        if self.topology_enabled:
+            dists = topology_fused_cost(
+                dists,
+                r_tracked_stracks,
+                detections_second,
+                alpha=self.topology_alpha,
+                topology_lambda=self.topology_lambda,
+            )
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]

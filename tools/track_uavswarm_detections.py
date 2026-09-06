@@ -39,6 +39,15 @@ def parse_args():
     parser.add_argument("--match-thresh", type=float, default=0.9)
     parser.add_argument("--min-box-area", type=float, default=100.0)
     parser.add_argument("--aspect-ratio-thresh", type=float, default=1.6)
+    parser.add_argument(
+        "--topology",
+        action="store_true",
+        help="Enable topology-aware low-confidence second association.",
+    )
+    parser.add_argument("--topology-kmin", type=int, default=2)
+    parser.add_argument("--topology-kmax", type=int, default=8)
+    parser.add_argument("--topology-alpha", type=float, default=0.6)
+    parser.add_argument("--topology-lambda", type=float, default=0.30)
     parser.add_argument("--mot20", action="store_true")
     return parser.parse_args()
 
@@ -136,6 +145,11 @@ def main():
             "match_thresh": args.match_thresh,
             "min_box_area": args.min_box_area,
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
+            "topology": args.topology,
+            "topology_kmin": args.topology_kmin,
+            "topology_kmax": args.topology_kmax,
+            "topology_alpha": args.topology_alpha,
+            "topology_lambda": args.topology_lambda,
             "mot20": args.mot20,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
