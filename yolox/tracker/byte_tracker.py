@@ -156,9 +156,9 @@ class BYTETracker(object):
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
 
-    def association_distance(self, atracks, btracks):
+    def association_distance(self, atracks, btracks, stage='default'):
         metric = getattr(self.args, 'association_metric', 'iou')
-        if metric == 'diou':
+        if metric == 'diou' or (metric == 'diou_first' and stage == 'first'):
             return matching.diou_distance(atracks, btracks)
         return matching.iou_distance(atracks, btracks)
 
@@ -210,7 +210,7 @@ class BYTETracker(object):
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
-        dists = self.association_distance(strack_pool, detections)
+        dists = self.association_distance(strack_pool, detections, stage='first')
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
