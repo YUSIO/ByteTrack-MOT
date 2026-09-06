@@ -211,7 +211,7 @@ class BYTETracker(object):
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
         dists = self.association_distance(strack_pool, detections, stage='first')
-        if not self.args.mot20:
+        if not self.args.mot20 and not getattr(self.args, 'disable_score_fusion', False):
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
@@ -255,7 +255,7 @@ class BYTETracker(object):
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
         detections = [detections[i] for i in u_detection]
         dists = self.association_distance(unconfirmed, detections)
-        if not self.args.mot20:
+        if not self.args.mot20 and not getattr(self.args, 'disable_score_fusion', False):
             dists = matching.fuse_score(dists, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
         for itracked, idet in matches:

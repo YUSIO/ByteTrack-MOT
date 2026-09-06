@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--min-box-area", type=float, default=100.0)
     parser.add_argument("--aspect-ratio-thresh", type=float, default=1.6)
     parser.add_argument("--association-metric", choices=("iou", "diou", "diou_first"), default="iou")
+    parser.add_argument(
+        "--disable-score-fusion",
+        action="store_true",
+        help="Do not fuse detection confidence into the association cost.",
+    )
     parser.add_argument("--mot20", action="store_true")
     return parser.parse_args()
 
