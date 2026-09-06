@@ -48,6 +48,26 @@ def parse_args():
     parser.add_argument("--topology-kmax", type=int, default=8)
     parser.add_argument("--topology-alpha", type=float, default=0.6)
     parser.add_argument("--topology-lambda", type=float, default=0.30)
+    parser.add_argument(
+        "--anchor-displacement",
+        action="store_true",
+        help="Enable deterministic anchor-displacement refinement in first-stage ambiguous components.",
+    )
+    parser.add_argument("--anchor-min-count", type=int, default=3)
+    parser.add_argument("--anchor-max-count", type=int, default=5)
+    parser.add_argument("--anchor-cost-threshold", type=float, default=0.75)
+    parser.add_argument("--anchor-margin", type=float, default=0.05)
+    parser.add_argument("--anchor-min-age", type=int, default=3)
+    parser.add_argument("--anchor-radius", type=float, default=200.0)
+    parser.add_argument("--anchor-sigma-floor", type=float, default=4.0)
+    parser.add_argument("--anchor-residual-threshold", type=float, default=25.0)
+    parser.add_argument("--anchor-lambda", type=float, default=0.25)
+    parser.add_argument(
+        "--anchor-trace-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for per-sequence JSONL anchor-association traces.",
+    )
     parser.add_argument("--mot20", action="store_true")
     return parser.parse_args()
 
@@ -89,6 +109,20 @@ def write_sequence_results(path, rows):
             )
 
 
+def write_anchor_trace(path, sequence_name, frame_id, traces):
+    if not traces:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as destination:
+        for trace in traces:
+            record = {
+                "sequence": sequence_name,
+                "frame": int(frame_id),
+                **trace,
+            }
+            destination.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def track_sequence(sequence_dir, output_dir, args):
     info = read_sequence_info(sequence_dir)
     if args.detections_root is None:
@@ -115,6 +149,13 @@ def track_sequence(sequence_dir, output_dir, args):
             (info["height"], info["width"]),
             (info["height"], info["width"]),
         )
+        if args.anchor_trace_dir is not None:
+            write_anchor_trace(
+                args.anchor_trace_dir / f"{info['name']}.jsonl",
+                info["name"],
+                frame,
+                tracker.last_anchor_trace,
+            )
         for target in online_targets:
             x, y, width, height = target.tlwh
             is_vertical = width / height > args.aspect_ratio_thresh
@@ -150,6 +191,16 @@ def main():
             "topology_kmax": args.topology_kmax,
             "topology_alpha": args.topology_alpha,
             "topology_lambda": args.topology_lambda,
+            "anchor_displacement": args.anchor_displacement,
+            "anchor_min_count": args.anchor_min_count,
+            "anchor_max_count": args.anchor_max_count,
+            "anchor_cost_threshold": args.anchor_cost_threshold,
+            "anchor_margin": args.anchor_margin,
+            "anchor_min_age": args.anchor_min_age,
+            "anchor_radius": args.anchor_radius,
+            "anchor_sigma_floor": args.anchor_sigma_floor,
+            "anchor_residual_threshold": args.anchor_residual_threshold,
+            "anchor_lambda": args.anchor_lambda,
             "mot20": args.mot20,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,

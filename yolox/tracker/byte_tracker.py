@@ -10,6 +10,7 @@ from scipy.optimize import linear_sum_assignment
 from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
+from .anchor_displacement import associate_with_anchor_displacement, box_center
 
 
 def _clone_topology(topology):
@@ -269,6 +270,17 @@ class BYTETracker(object):
         self.topology_kmin = int(getattr(args, "topology_kmin", 2))
         self.topology_alpha = float(getattr(args, "topology_alpha", 0.6))
         self.topology_lambda = float(getattr(args, "topology_lambda", 0.30))
+        self.anchor_displacement_enabled = bool(getattr(args, "anchor_displacement", False))
+        self.anchor_min_count = int(getattr(args, "anchor_min_count", 3))
+        self.anchor_max_count = int(getattr(args, "anchor_max_count", 5))
+        self.anchor_cost_threshold = float(getattr(args, "anchor_cost_threshold", 0.75))
+        self.anchor_margin = float(getattr(args, "anchor_margin", 0.05))
+        self.anchor_min_age = int(getattr(args, "anchor_min_age", 3))
+        self.anchor_radius = float(getattr(args, "anchor_radius", 200.0))
+        self.anchor_sigma_floor = float(getattr(args, "anchor_sigma_floor", 4.0))
+        self.anchor_residual_threshold = float(getattr(args, "anchor_residual_threshold", 25.0))
+        self.anchor_lambda = float(getattr(args, "anchor_lambda", 0.25))
+        self.last_anchor_trace = []
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -336,12 +348,37 @@ class BYTETracker(object):
 
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+        prior_centers = {
+            int(track.track_id): box_center(track.tlwh)
+            for track in strack_pool
+            if getattr(track, "mean", None) is not None
+        }
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
         dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        self.last_anchor_trace = []
+        if self.anchor_displacement_enabled:
+            matches, u_track, u_detection, self.last_anchor_trace = associate_with_anchor_displacement(
+                strack_pool,
+                detections,
+                dists,
+                matches,
+                prior_centers,
+                self.frame_id,
+                match_threshold=self.args.match_thresh,
+                anchor_min_count=self.anchor_min_count,
+                anchor_max_count=self.anchor_max_count,
+                anchor_cost_threshold=self.anchor_cost_threshold,
+                anchor_margin=self.anchor_margin,
+                anchor_min_age=self.anchor_min_age,
+                anchor_radius=self.anchor_radius,
+                anchor_sigma_floor=self.anchor_sigma_floor,
+                anchor_residual_threshold=self.anchor_residual_threshold,
+                anchor_lambda=self.anchor_lambda,
+            )
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
