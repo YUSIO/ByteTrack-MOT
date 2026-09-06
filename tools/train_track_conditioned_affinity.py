@@ -16,8 +16,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--detections-root", type=Path, required=True)
-    parser.add_argument("--fit-sequences", nargs="+", required=True)
-    parser.add_argument("--validation-sequences", nargs="+", required=True)
+    parser.add_argument("--fit-sequences", nargs="+")
+    parser.add_argument("--validation-sequences", nargs="+")
+    parser.add_argument("--refit-sequences", nargs="+")
+    parser.add_argument("--fixed-epochs", type=int)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
@@ -38,13 +40,19 @@ def main():
     args = parse_args()
     if args.output_dir.exists():
         raise FileExistsError("refusing to overwrite output directory: {}".format(args.output_dir))
-    if set(args.fit_sequences) & set(args.validation_sequences):
+    refit_mode = args.refit_sequences is not None
+    if refit_mode:
+        if args.fit_sequences is not None or args.validation_sequences is not None or args.fixed_epochs is None:
+            raise ValueError("refit mode requires --refit-sequences and --fixed-epochs only")
+    elif args.fit_sequences is None or args.validation_sequences is None or args.fixed_epochs is not None:
+        raise ValueError("selection mode requires fit/validation sequences and no fixed epoch")
+    if not refit_mode and set(args.fit_sequences) & set(args.validation_sequences):
         raise ValueError("fit and validation sequences must be disjoint")
     if min(args.epochs, args.hidden_dim, args.batch_size, args.pair_top_k, args.track_buffer) < 1 or args.learning_rate <= 0.0:
         raise ValueError("epochs, hidden_dim, batch_size, pair_top_k, track_buffer and learning_rate must be positive")
     if not 0.0 <= args.dropout < 1.0:
         raise ValueError("dropout must be in [0,1)")
-    arguments = {
+    tracker_arguments = {
         "top_k": args.pair_top_k,
         "track_thresh": args.track_thresh,
         "det_thresh": args.det_thresh,
@@ -52,9 +60,14 @@ def main():
         "match_thresh": args.match_thresh,
     }
     args.output_dir.mkdir(parents=True)
-    fit, fit_summary = extract_track_affinity_supervision(args.dataset_root, args.detections_root, args.fit_sequences, **arguments)
-    validation, validation_summary = extract_track_affinity_supervision(args.dataset_root, args.detections_root, args.validation_sequences, **arguments)
-    outcome = fit_track_affinity(fit, validation, args.output_dir, args.device, args.seed, args.epochs, args.hidden_dim, args.dropout, args.learning_rate, args.batch_size)
+    if refit_mode:
+        fit, fit_summary = extract_track_affinity_supervision(args.dataset_root, args.detections_root, args.refit_sequences, **tracker_arguments)
+        validation, validation_summary = None, None
+        outcome = fit_track_affinity(fit, None, args.output_dir, args.device, args.seed, args.epochs, args.hidden_dim, args.dropout, args.learning_rate, args.batch_size, fixed_epochs=args.fixed_epochs)
+    else:
+        fit, fit_summary = extract_track_affinity_supervision(args.dataset_root, args.detections_root, args.fit_sequences, **tracker_arguments)
+        validation, validation_summary = extract_track_affinity_supervision(args.dataset_root, args.detections_root, args.validation_sequences, **tracker_arguments)
+        outcome = fit_track_affinity(fit, validation, args.output_dir, args.device, args.seed, args.epochs, args.hidden_dim, args.dropout, args.learning_rate, args.batch_size)
     checkpoint = Path(outcome["checkpoint"])
     summary = {
         "schema_version": 1,
@@ -69,7 +82,9 @@ def main():
             "dropout": args.dropout,
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,
-            **arguments,
+            **tracker_arguments,
+            "mode": "fixed_epoch_refit" if refit_mode else "fit_validation_selection",
+            "fixed_epochs": args.fixed_epochs,
         },
         "fit": fit_summary,
         "validation": validation_summary,

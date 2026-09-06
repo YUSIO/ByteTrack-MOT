@@ -231,19 +231,26 @@ def affinity_metrics(model, values, labels, device):
     }
 
 
-def fit_track_affinity(fit, validation, output_dir, device_name, seed=0, epochs=40, hidden_dim=64, dropout=0.1, learning_rate=1e-3, batch_size=4096):
-    if min(len(fit["y"]), len(validation["y"])) == 0 or not fit["y"].sum() or not validation["y"].sum():
-        raise ValueError("fit and validation affinity supervision must contain positive and negative samples")
+def fit_track_affinity(fit, validation, output_dir, device_name, seed=0, epochs=40, hidden_dim=64, dropout=0.1, learning_rate=1e-3, batch_size=4096, fixed_epochs=None):
+    if not len(fit["y"]) or not fit["y"].sum() or int((fit["y"] <= 0.5).sum()) == 0:
+        raise ValueError("fit affinity supervision must contain positive and negative samples")
+    if validation is None and fixed_epochs is None:
+        raise ValueError("fixed_epochs is required when validation is omitted")
+    if validation is not None and (not len(validation["y"]) or not validation["y"].sum() or int((validation["y"] <= 0.5).sum()) == 0):
+        raise ValueError("validation affinity supervision must contain positive and negative samples")
     torch.manual_seed(seed)
     generator, device = np.random.default_rng(seed), torch.device(device_name)
     mean, std = scale_fit(fit["x"])
-    fit_x, validation_x = scale(fit["x"], mean, std), scale(validation["x"], mean, std)
+    fit_x = scale(fit["x"], mean, std)
+    validation_x = scale(validation["x"], mean, std) if validation is not None else None
     model = MLP(len(AFFINITY_NAMES), hidden_dim, dropout).to(device)
     positive_weight = min((len(fit["y"]) - fit["y"].sum()) / max(fit["y"].sum(), 1.0), 30.0)
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor(positive_weight, device=device))
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    checkpoint, history, best = output_dir / "checkpoint.pt", [], {"bce": float("inf"), "epoch": -1}
-    for epoch in range(1, epochs + 1):
+    checkpoint, history = output_dir / "checkpoint.pt", []
+    selected_epochs = fixed_epochs if fixed_epochs is not None else epochs
+    best = {"bce": float("inf"), "epoch": -1} if validation is not None else {"fixed_epochs": selected_epochs, "epoch": selected_epochs}
+    for epoch in range(1, selected_epochs + 1):
         model.train()
         order = generator.permutation(len(fit_x))
         for start in range(0, len(order), batch_size):
@@ -253,10 +260,16 @@ def fit_track_affinity(fit, validation, output_dir, device_name, seed=0, epochs=
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
-        metric = affinity_metrics(model, validation_x, validation["y"], device)
-        history.append({"epoch": epoch, "validation": metric})
-        if metric["bce"] < best["bce"]:
-            best = {"bce": metric["bce"], "epoch": epoch}
+        if validation is None:
+            history.append({"epoch": epoch, "selection": "fixed_epoch_refit_without_validation"})
+            should_save = epoch == selected_epochs
+        else:
+            metric = affinity_metrics(model, validation_x, validation["y"], device)
+            history.append({"epoch": epoch, "validation": metric})
+            should_save = metric["bce"] < best["bce"]
+            if should_save:
+                best = {"bce": metric["bce"], "epoch": epoch}
+        if should_save:
             torch.save({
                 "schema_version": 1,
                 "method": "track_conditioned_affinity",
