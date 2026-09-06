@@ -50,6 +50,10 @@ def parse_args():
     parser.add_argument("--min-box-area", type=float, default=100.0)
     parser.add_argument("--aspect-ratio-thresh", type=float, default=1.6)
     parser.add_argument("--mot20", action="store_true")
+    parser.add_argument("--affinity-checkpoint", type=Path)
+    parser.add_argument("--affinity-device", default="cuda:0" if __import__("torch").cuda.is_available() else "cpu")
+    parser.add_argument("--affinity-weight", type=float, default=0.0)
+    parser.add_argument("--affinity-min-probability", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -100,6 +104,14 @@ def track_sequence(sequence_dir, output_dir, args):
         raise FileNotFoundError(f"missing detector cache for {info['name']}: {detection_path}")
     detections = load_detections(detection_path)
     BaseTrack._count = 0
+    if args.affinity_checkpoint is not None:
+        from track_conditioned_affinity import TrackAffinityPredictor
+        args.association_adjuster = TrackAffinityPredictor(
+            args.affinity_checkpoint, args.affinity_device, info["width"], info["height"],
+            args.affinity_weight, args.affinity_min_probability,
+        )
+    else:
+        args.association_adjuster = None
     tracker = BYTETracker(args, frame_rate=info["frame_rate"])
     result_rows = []
     input_count = 0
@@ -155,6 +167,10 @@ def main():
             "min_box_area": args.min_box_area,
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
             "mot20": args.mot20,
+            "affinity_checkpoint": str(args.affinity_checkpoint) if args.affinity_checkpoint else None,
+            "affinity_device": args.affinity_device if args.affinity_checkpoint else None,
+            "affinity_weight": args.affinity_weight if args.affinity_checkpoint else None,
+            "affinity_min_probability": args.affinity_min_probability if args.affinity_checkpoint else None,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,
