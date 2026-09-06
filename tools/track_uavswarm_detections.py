@@ -33,6 +33,7 @@ def parse_args():
         ),
     )
     parser.add_argument("--split", choices=("test", "train"), default="test")
+    parser.add_argument("--sequences", nargs="+", metavar="SEQUENCE")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--track-thresh", type=float, default=0.6)
     parser.add_argument(
@@ -136,6 +137,13 @@ def main():
     sequence_dirs = sorted(path for path in split_dir.glob("UAVSwarm-*") if path.is_dir())
     if not sequence_dirs:
         raise FileNotFoundError(f"no UAVSwarm sequences found under {split_dir}")
+    if args.sequences is not None:
+        requested = set(args.sequences)
+        available = {path.name for path in sequence_dirs}
+        unknown = sorted(requested - available)
+        if unknown:
+            raise ValueError(f"unknown {args.split} sequences: {', '.join(unknown)}")
+        sequence_dirs = [path for path in sequence_dirs if path.name in requested]
     args.output_dir.mkdir(parents=True, exist_ok=False)
     summaries = [track_sequence(sequence_dir, args.output_dir, args) for sequence_dir in sequence_dirs]
     summary = {

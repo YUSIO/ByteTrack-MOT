@@ -54,6 +54,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--split", choices=("test", "train"), default="test")
+    parser.add_argument("--sequences", nargs="+", metavar="SEQUENCE")
     parser.add_argument("--tracker-results", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
@@ -155,6 +156,13 @@ def main():
     sequence_dirs = sorted(path for path in (args.dataset_root / args.split).glob("UAVSwarm-*") if path.is_dir())
     if not sequence_dirs:
         raise FileNotFoundError(f"no UAVSwarm sequences found under {args.dataset_root / args.split}")
+    if args.sequences is not None:
+        requested = set(args.sequences)
+        available = {path.name for path in sequence_dirs}
+        unknown = sorted(requested - available)
+        if unknown:
+            raise ValueError(f"unknown {args.split} sequences: {', '.join(unknown)}")
+        sequence_dirs = [path for path in sequence_dirs if path.name in requested]
     mm.lap.default_solver = "lap"
     mot_accumulators, sequence_names, hota_by_sequence = [], [], {}
     for sequence_dir in sequence_dirs:
