@@ -35,6 +35,15 @@ def parse_args():
     parser.add_argument("--split", choices=("test", "train"), default="test")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--track-thresh", type=float, default=0.6)
+    parser.add_argument(
+        "--det-thresh",
+        type=float,
+        default=None,
+        help=(
+            "Score required to initialize a new track. When omitted, preserves "
+            "the upstream-compatible value track_thresh + 0.1."
+        ),
+    )
     parser.add_argument("--track-buffer", type=int, default=30)
     parser.add_argument("--match-thresh", type=float, default=0.9)
     parser.add_argument("--min-box-area", type=float, default=100.0)
@@ -132,6 +141,7 @@ def main():
     summary = {
         "parameters": {
             "track_thresh": args.track_thresh,
+            "det_thresh": args.det_thresh if args.det_thresh is not None else args.track_thresh + 0.1,
             "track_buffer": args.track_buffer,
             "match_thresh": args.match_thresh,
             "min_box_area": args.min_box_area,
