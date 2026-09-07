@@ -12,7 +12,7 @@ from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, appearance_feature=None):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -22,6 +22,26 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.appearance_feature = None
+        self.set_appearance_feature(appearance_feature)
+
+    def set_appearance_feature(self, feature):
+        """Store one L2-normalized observation feature for this track.
+
+        This tracker branch deliberately keeps the most recent observed ROI
+        feature only.  It does not learn a reliability score, choose between
+        features, or adapt the association rule per candidate.
+        """
+        if feature is None:
+            self.appearance_feature = None
+            return
+        vector = np.asarray(feature, dtype=np.float32).reshape(-1)
+        if vector.size == 0 or not np.isfinite(vector).all():
+            raise ValueError("appearance feature must be a finite non-empty vector")
+        norm = float(np.linalg.norm(vector))
+        if norm <= 0.0:
+            raise ValueError("appearance feature must have non-zero L2 norm")
+        self.appearance_feature = vector / norm
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -67,6 +87,7 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self.set_appearance_feature(new_track.appearance_feature)
 
     def update(self, new_track, frame_id):
         """
@@ -86,6 +107,7 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        self.set_appearance_feature(new_track.appearance_feature)
 
     @property
     # @jit(nopython=True)
@@ -157,8 +179,11 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        self.appearance_weight = float(getattr(args, "appearance_weight", 0.0))
+        if not 0.0 <= self.appearance_weight <= 1.0:
+            raise ValueError("appearance_weight must be in [0, 1]")
 
-    def update(self, output_results, img_info, img_size):
+    def update(self, output_results, img_info, img_size, appearance_features=None):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -176,6 +201,17 @@ class BYTETracker(object):
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
         bboxes /= scale
 
+        if appearance_features is None:
+            features = [None] * len(scores)
+        else:
+            features = np.asarray(appearance_features, dtype=np.float32)
+            if features.ndim != 2 or features.shape[0] != len(scores) or features.shape[1] == 0:
+                raise ValueError(
+                    "appearance_features must have shape (number of detections, feature dimension)"
+                )
+            if not np.isfinite(features).all():
+                raise ValueError("appearance_features must be finite")
+
         remain_inds = scores > self.args.track_thresh
         inds_low = scores > 0.1
         inds_high = scores < self.args.track_thresh
@@ -185,11 +221,13 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+        features_keep = [features[index] for index in np.flatnonzero(remain_inds)]
+        features_second = [features[index] for index in np.flatnonzero(inds_second)]
 
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, feature) for
+                          (tlbr, s, feature) in zip(dets, scores_keep, features_keep)]
         else:
             detections = []
 
@@ -209,6 +247,10 @@ class BYTETracker(object):
         dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        if self.appearance_weight > 0.0:
+            dists = matching.fuse_appearance(
+                dists, strack_pool, detections, self.appearance_weight
+            )
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
@@ -225,8 +267,8 @@ class BYTETracker(object):
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
+            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s, feature) for
+                          (tlbr, s, feature) in zip(dets_second, scores_second, features_second)]
         else:
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]

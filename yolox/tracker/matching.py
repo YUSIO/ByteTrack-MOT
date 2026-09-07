@@ -179,3 +179,31 @@ def fuse_score(cost_matrix, detections):
     fuse_sim = iou_sim * det_scores
     fuse_cost = 1 - fuse_sim
     return fuse_cost
+
+
+def fuse_appearance(cost_matrix, tracks, detections, weight):
+    """Blend one fixed ROI-cosine cost into every primary-association pair.
+
+    ``cost_matrix`` is ByteTrack's existing IoU-and-detection-score cost.
+    The visual component is ``(1 - cosine) / 2``, bounded in [0, 1] for
+    L2-normalized features.  The same global ``weight`` is used for every
+    pair; this function contains no confidence gate, threshold, or learned
+    dispatch mechanism.
+    """
+    if cost_matrix.size == 0:
+        return cost_matrix
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError("appearance weight must be in [0, 1]")
+    track_features = [track.appearance_feature for track in tracks]
+    detection_features = [detection.appearance_feature for detection in detections]
+    if any(feature is None for feature in track_features + detection_features):
+        raise ValueError(
+            "appearance_weight requires a feature for every primary-association track and detection"
+        )
+    track_matrix = np.asarray(track_features, dtype=np.float32)
+    detection_matrix = np.asarray(detection_features, dtype=np.float32)
+    if track_matrix.ndim != 2 or detection_matrix.ndim != 2:
+        raise ValueError("appearance feature matrices must be two-dimensional")
+    cosine = np.clip(track_matrix @ detection_matrix.T, -1.0, 1.0)
+    appearance_cost = (1.0 - cosine) / 2.0
+    return ((1.0 - weight) * cost_matrix + weight * appearance_cost).astype(float)
