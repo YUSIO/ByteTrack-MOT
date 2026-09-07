@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument("--tracker-results", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--sequences",
+        nargs="+",
+        metavar="SEQUENCE",
+        help="Optional exact sequence subset; omitted preserves full-split evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -152,9 +158,15 @@ def serialise_hota_result(result, metric):
 
 def main():
     args = parse_args()
-    sequence_dirs = sorted(path for path in (args.dataset_root / args.split).glob("UAVSwarm-*") if path.is_dir())
-    if not sequence_dirs:
+    available = sorted(path for path in (args.dataset_root / args.split).glob("UAVSwarm-*") if path.is_dir())
+    if not available:
         raise FileNotFoundError(f"no UAVSwarm sequences found under {args.dataset_root / args.split}")
+    available_by_name = {path.name: path for path in available}
+    selected_names = list(dict.fromkeys(args.sequences)) if args.sequences else list(available_by_name)
+    unknown = sorted(set(selected_names) - set(available_by_name))
+    if unknown:
+        raise ValueError(f"unknown {args.split} sequences: {', '.join(unknown)}")
+    sequence_dirs = [available_by_name[name] for name in selected_names]
     mm.lap.default_solver = "lap"
     mot_accumulators, sequence_names, hota_by_sequence = [], [], {}
     for sequence_dir in sequence_dirs:
