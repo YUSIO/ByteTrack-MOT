@@ -181,7 +181,7 @@ def fuse_score(cost_matrix, detections):
     return fuse_cost
 
 
-def fuse_appearance(cost_matrix, tracks, detections, weight):
+def fuse_appearance(cost_matrix, tracks, detections, weight, track_permutation=None):
     """Blend one fixed ROI-cosine cost into every primary-association pair.
 
     ``cost_matrix`` is ByteTrack's existing IoU-and-detection-score cost.
@@ -195,6 +195,12 @@ def fuse_appearance(cost_matrix, tracks, detections, weight):
     if not 0.0 <= weight <= 1.0:
         raise ValueError("appearance weight must be in [0, 1]")
     track_features = [track.appearance_feature for track in tracks]
+    if track_permutation is not None:
+        permutation = np.asarray(track_permutation, dtype=np.int64)
+        expected = np.arange(len(track_features), dtype=np.int64)
+        if permutation.shape != expected.shape or not np.array_equal(np.sort(permutation), expected):
+            raise ValueError("track_permutation must be a permutation of track indices")
+        track_features = [track_features[index] for index in permutation]
     detection_features = [detection.appearance_feature for detection in detections]
     if any(feature is None for feature in track_features + detection_features):
         raise ValueError(

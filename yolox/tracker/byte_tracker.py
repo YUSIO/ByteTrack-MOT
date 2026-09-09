@@ -182,6 +182,10 @@ class BYTETracker(object):
         self.appearance_weight = float(getattr(args, "appearance_weight", 0.0))
         if not 0.0 <= self.appearance_weight <= 1.0:
             raise ValueError("appearance_weight must be in [0, 1]")
+        permutation_seed = getattr(args, "appearance_permutation_seed", None)
+        self.appearance_permutation_seed = (
+            None if permutation_seed is None else int(permutation_seed)
+        )
 
     def update(self, output_results, img_info, img_size, appearance_features=None):
         self.frame_id += 1
@@ -248,8 +252,18 @@ class BYTETracker(object):
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         if self.appearance_weight > 0.0:
+            track_permutation = None
+            if self.appearance_permutation_seed is not None and len(strack_pool) > 1:
+                permutation_rng = np.random.default_rng(
+                    self.appearance_permutation_seed + self.frame_id
+                )
+                track_permutation = permutation_rng.permutation(len(strack_pool))
             dists = matching.fuse_appearance(
-                dists, strack_pool, detections, self.appearance_weight
+                dists,
+                strack_pool,
+                detections,
+                self.appearance_weight,
+                track_permutation=track_permutation,
             )
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 

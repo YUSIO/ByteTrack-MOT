@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--feature-cache-root", type=Path)
     parser.add_argument("--appearance-weight", type=float, required=True)
+    parser.add_argument(
+        "--appearance-permutation-seed",
+        type=int,
+        help="Deterministically permute track-history features per primary-association frame.",
+    )
     parser.add_argument("--track-thresh", type=float, default=0.6)
     parser.add_argument("--det-thresh", type=float, default=None)
     parser.add_argument("--track-buffer", type=int, default=30)
@@ -110,6 +115,8 @@ def main() -> None:
         raise ValueError("appearance-weight must be in [0, 1]")
     if args.appearance_weight > 0.0 and args.feature_cache_root is None:
         raise ValueError("feature-cache-root is required when appearance-weight is positive")
+    if args.appearance_permutation_seed is not None and args.appearance_weight <= 0.0:
+        raise ValueError("appearance-permutation-seed requires a positive appearance-weight")
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output directory: {args.output_dir}")
     split_root = args.dataset_root / args.split
@@ -135,6 +142,12 @@ def main() -> None:
             "mot20": args.mot20,
             "appearance_weight": args.appearance_weight,
             "appearance_policy": "single fixed convex cost for every primary-association pair; no gate",
+            "appearance_permutation_seed": args.appearance_permutation_seed,
+            "appearance_permutation_policy": (
+                "per-frame deterministic permutation of track-history features"
+                if args.appearance_permutation_seed is not None
+                else None
+            ),
         },
         "detector_cache_root": str(args.detections_root.resolve()),
         "feature_cache_root": str(args.feature_cache_root.resolve()) if args.feature_cache_root else None,
