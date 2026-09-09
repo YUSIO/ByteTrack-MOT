@@ -181,7 +181,14 @@ def fuse_score(cost_matrix, detections):
     return fuse_cost
 
 
-def fuse_appearance(cost_matrix, tracks, detections, weight, track_permutation=None):
+def fuse_appearance(
+    cost_matrix,
+    tracks,
+    detections,
+    weight,
+    track_permutation=None,
+    constant_cost=None,
+):
     """Blend one fixed ROI-cosine cost into every primary-association pair.
 
     ``cost_matrix`` is ByteTrack's existing IoU-and-detection-score cost.
@@ -194,22 +201,27 @@ def fuse_appearance(cost_matrix, tracks, detections, weight, track_permutation=N
         return cost_matrix
     if not 0.0 <= weight <= 1.0:
         raise ValueError("appearance weight must be in [0, 1]")
-    track_features = [track.appearance_feature for track in tracks]
-    if track_permutation is not None:
-        permutation = np.asarray(track_permutation, dtype=np.int64)
-        expected = np.arange(len(track_features), dtype=np.int64)
-        if permutation.shape != expected.shape or not np.array_equal(np.sort(permutation), expected):
-            raise ValueError("track_permutation must be a permutation of track indices")
-        track_features = [track_features[index] for index in permutation]
-    detection_features = [detection.appearance_feature for detection in detections]
-    if any(feature is None for feature in track_features + detection_features):
-        raise ValueError(
-            "appearance_weight requires a feature for every primary-association track and detection"
-        )
-    track_matrix = np.asarray(track_features, dtype=np.float32)
-    detection_matrix = np.asarray(detection_features, dtype=np.float32)
-    if track_matrix.ndim != 2 or detection_matrix.ndim != 2:
-        raise ValueError("appearance feature matrices must be two-dimensional")
-    cosine = np.clip(track_matrix @ detection_matrix.T, -1.0, 1.0)
-    appearance_cost = (1.0 - cosine) / 2.0
+    if constant_cost is not None:
+        if not 0.0 <= constant_cost <= 1.0:
+            raise ValueError("constant appearance cost must be in [0, 1]")
+        appearance_cost = np.full(cost_matrix.shape, float(constant_cost), dtype=float)
+    else:
+        track_features = [track.appearance_feature for track in tracks]
+        if track_permutation is not None:
+            permutation = np.asarray(track_permutation, dtype=np.int64)
+            expected = np.arange(len(track_features), dtype=np.int64)
+            if permutation.shape != expected.shape or not np.array_equal(np.sort(permutation), expected):
+                raise ValueError("track_permutation must be a permutation of track indices")
+            track_features = [track_features[index] for index in permutation]
+        detection_features = [detection.appearance_feature for detection in detections]
+        if any(feature is None for feature in track_features + detection_features):
+            raise ValueError(
+                "appearance_weight requires a feature for every primary-association track and detection"
+            )
+        track_matrix = np.asarray(track_features, dtype=np.float32)
+        detection_matrix = np.asarray(detection_features, dtype=np.float32)
+        if track_matrix.ndim != 2 or detection_matrix.ndim != 2:
+            raise ValueError("appearance feature matrices must be two-dimensional")
+        cosine = np.clip(track_matrix @ detection_matrix.T, -1.0, 1.0)
+        appearance_cost = (1.0 - cosine) / 2.0
     return ((1.0 - weight) * cost_matrix + weight * appearance_cost).astype(float)

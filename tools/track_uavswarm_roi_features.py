@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Deterministically permute track-history features per primary-association frame.",
     )
+    parser.add_argument(
+        "--appearance-constant-cost",
+        type=float,
+        help="Use a constant visual cost as a negative control instead of feature cosine.",
+    )
     parser.add_argument("--track-thresh", type=float, default=0.6)
     parser.add_argument("--det-thresh", type=float, default=None)
     parser.add_argument("--track-buffer", type=int, default=30)
@@ -117,6 +122,13 @@ def main() -> None:
         raise ValueError("feature-cache-root is required when appearance-weight is positive")
     if args.appearance_permutation_seed is not None and args.appearance_weight <= 0.0:
         raise ValueError("appearance-permutation-seed requires a positive appearance-weight")
+    if args.appearance_constant_cost is not None:
+        if args.appearance_weight <= 0.0:
+            raise ValueError("appearance-constant-cost requires a positive appearance-weight")
+        if not 0.0 <= args.appearance_constant_cost <= 1.0:
+            raise ValueError("appearance-constant-cost must be in [0, 1]")
+        if args.appearance_permutation_seed is not None:
+            raise ValueError("appearance-constant-cost cannot be combined with feature permutation")
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite output directory: {args.output_dir}")
     split_root = args.dataset_root / args.split
@@ -146,6 +158,12 @@ def main() -> None:
             "appearance_permutation_policy": (
                 "per-frame deterministic permutation of track-history features"
                 if args.appearance_permutation_seed is not None
+                else None
+            ),
+            "appearance_constant_cost": args.appearance_constant_cost,
+            "appearance_null_policy": (
+                "constant visual cost negative control"
+                if args.appearance_constant_cost is not None
                 else None
             ),
         },

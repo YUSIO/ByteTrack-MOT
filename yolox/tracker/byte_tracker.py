@@ -186,6 +186,12 @@ class BYTETracker(object):
         self.appearance_permutation_seed = (
             None if permutation_seed is None else int(permutation_seed)
         )
+        constant_cost = getattr(args, "appearance_constant_cost", None)
+        self.appearance_constant_cost = (
+            None if constant_cost is None else float(constant_cost)
+        )
+        if self.appearance_constant_cost is not None and not 0.0 <= self.appearance_constant_cost <= 1.0:
+            raise ValueError("appearance_constant_cost must be in [0, 1]")
 
     def update(self, output_results, img_info, img_size, appearance_features=None):
         self.frame_id += 1
@@ -264,6 +270,7 @@ class BYTETracker(object):
                 detections,
                 self.appearance_weight,
                 track_permutation=track_permutation,
+                constant_cost=self.appearance_constant_cost,
             )
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
