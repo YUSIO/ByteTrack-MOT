@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--min-box-area", type=float, default=100.0)
     parser.add_argument("--aspect-ratio-thresh", type=float, default=1.6)
     parser.add_argument("--mot20", action="store_true")
+    parser.add_argument("--first-stage-cost", choices=("iou", "m2da"), default="iou")
+    parser.add_argument("--m2da-window", type=int, default=8,
+                        help="HOMATracker window T; the last T-1 one-step predictions are used")
+    parser.add_argument("--m2da-kappa", type=float, default=0.1,
+                        help="Eq. (13) similarity constant, in squared pixels")
     return parser.parse_args()
 
 
@@ -137,6 +142,9 @@ def main():
             "min_box_area": args.min_box_area,
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
             "mot20": args.mot20,
+            "first_stage_cost": args.first_stage_cost,
+            "m2da_window": args.m2da_window,
+            "m2da_kappa": args.m2da_kappa,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,

@@ -23,6 +23,13 @@ class STrack(BaseTrack):
         self.score = score
         self.tracklet_len = 0
 
+    def record_prediction(self, max_len):
+        """Keep the latest one-step Kalman predictions (centre and positional std)."""
+        if not hasattr(self, 'prediction_history') or self.prediction_history.maxlen != max_len:
+            self.prediction_history = deque(getattr(self, 'prediction_history', []), maxlen=max_len)
+        std = np.sqrt(np.diag(self.covariance)[:2])
+        self.prediction_history.append(np.array([self.mean[0], self.mean[1], std[0], std[1]]))
+
     def predict(self):
         mean_state = self.mean.copy()
         if self.state != TrackState.Tracked:
@@ -204,7 +211,16 @@ class BYTETracker(object):
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
-        dists = matching.iou_distance(strack_pool, detections)
+        # Default 'iou' is upstream ByteTrack; 'm2da' follows HOMATracker Eqs. (9)-(13).
+        first_stage_cost = getattr(self.args, 'first_stage_cost', 'iou')
+        if first_stage_cost == 'iou':
+            dists = matching.iou_distance(strack_pool, detections)
+        elif first_stage_cost == 'm2da':
+            for track in strack_pool:
+                track.record_prediction(self.args.m2da_window - 1)
+            dists = matching.m2da_distance(strack_pool, detections, self.args.m2da_kappa)
+        else:
+            raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)

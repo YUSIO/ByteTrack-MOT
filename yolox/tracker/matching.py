@@ -170,6 +170,28 @@ def fuse_iou(cost_matrix, tracks, detections):
     return fuse_cost
 
 
+def m2da_distance(tracks, detections, kappa):
+    """HOMATracker M2DA cost (Chu et al., CJA 2025, Eqs. 9-13).
+
+    Detection d_n -> [x, y, w/h, w/h] (Eq. 10 as printed); each stored one-step
+    prediction -> [x, y, sigma_x, sigma_y] from the Kalman covariance (Eq. 9).
+    W_A is the squared 2-Wasserstein distance (Eq. 11). Deviation: the window
+    terms are averaged rather than summed (Eq. 12) so tracks with different
+    history lengths stay comparable. Similarity kappa / (kappa + W) (Eq. 13 uses
+    0.1 without stating coordinate units); returned as cost 1 - similarity.
+    """
+    cost = np.ones((len(tracks), len(detections)), dtype=float)
+    if cost.size == 0:
+        return cost
+    det = np.array([[d.tlwh[0] + d.tlwh[2] / 2, d.tlwh[1] + d.tlwh[3] / 2,
+                     d.tlwh[2] / d.tlwh[3], d.tlwh[2] / d.tlwh[3]] for d in detections])
+    for i, track in enumerate(tracks):
+        history = np.asarray(track.prediction_history)            # (K, 4)
+        w2 = ((det[None, :, :] - history[:, None, :]) ** 2).sum(axis=2)  # (K, N)
+        cost[i] = 1 - kappa / (kappa + w2.mean(axis=0))
+    return cost
+
+
 def fuse_score(cost_matrix, detections):
     if cost_matrix.size == 0:
         return cost_matrix
