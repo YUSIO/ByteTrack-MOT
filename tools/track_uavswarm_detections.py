@@ -54,6 +54,8 @@ def parse_args():
     parser.add_argument("--affinity-device", default="cuda:0" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--affinity-weight", type=float, default=0.0)
     parser.add_argument("--affinity-min-probability", type=float, default=0.5)
+    parser.add_argument("--affinity-apply-to", choices=("all", "tracked", "lost"), default="all",
+                        help="restrict the affinity cost adjustment to Tracked or Lost track rows (attribution)")
     return parser.parse_args()
 
 
@@ -108,7 +110,7 @@ def track_sequence(sequence_dir, output_dir, args):
         from track_conditioned_affinity import TrackAffinityPredictor
         args.association_adjuster = TrackAffinityPredictor(
             args.affinity_checkpoint, args.affinity_device, info["width"], info["height"],
-            args.affinity_weight, args.affinity_min_probability,
+            args.affinity_weight, args.affinity_min_probability, args.affinity_apply_to,
         )
     else:
         args.association_adjuster = None
@@ -171,6 +173,7 @@ def main():
             "affinity_device": args.affinity_device if args.affinity_checkpoint else None,
             "affinity_weight": args.affinity_weight if args.affinity_checkpoint else None,
             "affinity_min_probability": args.affinity_min_probability if args.affinity_checkpoint else None,
+            "affinity_apply_to": args.affinity_apply_to if args.affinity_checkpoint else None,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,

@@ -286,9 +286,12 @@ def fit_track_affinity(fit, validation, output_dir, device_name, seed=0, epochs=
 
 
 class TrackAffinityPredictor:
-    def __init__(self, checkpoint_path, device_name, width, height, weight, minimum_probability):
+    def __init__(self, checkpoint_path, device_name, width, height, weight, minimum_probability, apply_to="all"):
         if not (0.0 <= weight <= 1.0 and 0.0 < minimum_probability < 1.0):
             raise ValueError("invalid affinity inference parameters")
+        if apply_to not in ("all", "tracked", "lost"):
+            raise ValueError("apply_to must be all, tracked or lost")
+        self.apply_to = apply_to
         self.device = torch.device(device_name)
         payload = torch.load(checkpoint_path, map_location=self.device)
         if payload.get("schema_version") != 1 or payload.get("method") != "track_conditioned_affinity":
@@ -306,4 +309,9 @@ class TrackAffinityPredictor:
         values = affinity_features(tracks, detections, pairs, self.width, self.height, frame_id)
         probability = safe_sigmoid(predict_logits(self.model, scale(values, self.mean, self.std), self.device)).reshape(len(tracks), len(detections))
         blended = (1.0 - self.weight) * costs + self.weight * (1.0 - probability)
-        return np.where(probability >= self.minimum_probability, blended, costs).astype(np.float32)
+        use = probability >= self.minimum_probability
+        if self.apply_to != "all":
+            # Attribution switch: restrict the cost adjustment to rows of Tracked or of Lost states.
+            tracked = np.asarray([track.state == TrackState.Tracked for track in tracks], dtype=bool)[:, None]
+            use = use & (tracked if self.apply_to == "tracked" else ~tracked)
+        return np.where(use, blended, costs).astype(np.float32)
