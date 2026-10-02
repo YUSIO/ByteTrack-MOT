@@ -293,7 +293,8 @@ class TrackAffinityPredictor:
             raise ValueError("apply_to must be all, tracked or lost")
         self.apply_to = apply_to
         self.device = torch.device(device_name)
-        payload = torch.load(checkpoint_path, map_location=self.device)
+        # Own checkpoint (contains NumPy scaling arrays); torch>=2.6 defaults to weights_only=True.
+        payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         if payload.get("schema_version") != 1 or payload.get("method") != "track_conditioned_affinity":
             raise ValueError("unsupported affinity checkpoint: {}".format(checkpoint_path))
         self.model = MLP(len(AFFINITY_NAMES), payload["hidden_dim"], payload["dropout"]).to(self.device)
