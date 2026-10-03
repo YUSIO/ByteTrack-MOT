@@ -59,17 +59,29 @@ class PaperPoseBlock(nn.Module):
             return c.squeeze(0) @ enhanced.squeeze(0).T
 
 
+class ResidualNormPoseBlock(PaperPoseBlock):
+    """Diagnostic-supported engineering variant, not verified author architecture."""
+    def forward(self, current, history):
+        with torch.autocast(current.device.type, enabled=False):
+            h = F.layer_norm(history.float(), (history.shape[-1],)).unsqueeze(0)
+            q = F.layer_norm(current.float(), (current.shape[-1],)).unsqueeze(0)
+            enhanced = self.hmlp(h + self.sa(h, h, h, need_weights=False)[0])
+            c = self.cmlp(q + self.ca(q, enhanced, enhanced, need_weights=False)[0])
+            return c.squeeze(0) @ enhanced.squeeze(0).T
+
+
 class MPANet(nn.Module):
     def __init__(self, pretrained=False, architecture='legacy_v1'):
         super().__init__()
-        if architecture not in ('legacy_v1', 'paper_v2'):
+        if architecture not in ('legacy_v1', 'paper_v2', 'residual_norm_v3'):
             raise ValueError(architecture)
         self.architecture = architecture
         r = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if pretrained else None)
         self.backbone = nn.Sequential(r.conv1, r.bn1, r.relu, r.maxpool, r.layer1, r.layer2, r.layer3)
         self.reduce = nn.Conv2d(1024, 256, 1)
         self.patch = nn.ModuleList([nn.Conv2d(256, 512, 2, stride=2) for _ in range(3)])
-        block = PaperPoseBlock if architecture == 'paper_v2' else PoseBlock
+        block = {'legacy_v1': PoseBlock, 'paper_v2': PaperPoseBlock,
+                 'residual_norm_v3': ResidualNormPoseBlock}[architecture]
         self.pose = nn.ModuleList([block(d) for d in (2048, 4096, 2048)])
         self.fuse = nn.Conv2d(3, 1, 1)
         nn.init.constant_(self.fuse.weight, 1 / 3)
@@ -94,7 +106,7 @@ class MPANet(nn.Module):
     def logits(self, current, history):
         cs, hs = current.split((2048, 4096, 2048), 1), history.split((2048, 4096, 2048), 1)
         parts = torch.stack([p(c, h) for p, c, h in zip(self.pose, cs, hs)], dim=0)
-        if self.architecture == 'paper_v2':
+        if self.architecture != 'legacy_v1':
             with torch.autocast(current.device.type, enabled=False):
                 fused = F.relu(self.fuse(parts.float().unsqueeze(0)).squeeze(0).squeeze(0))
         else:

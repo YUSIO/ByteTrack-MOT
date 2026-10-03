@@ -29,6 +29,12 @@ run_001 在 epoch 2 遇到非有限梯度并退出。修正 AMP 溢出处理：�
 
 本节仅用于 `architecture=paper_v2` / `lifecycle=mha_v2`，旧 checkpoint 使用 `legacy_v1` 路径。v1 运行不可在 v2 代码上无条件重演，应 checkout 各 run 原 SHA。
 
+### v3 可学习性修订
+
+`architecture=residual_norm_v3` 在 v2 full-D head 上对 history/current 向量先执行无 affine 参数的 functional LayerNorm，再保留 `h + SA(h)` 和 `q + CA(q, enhanced_history)` 两条残差。head/fusion 保持 FP32、backbone AMP，all-frame/pair-weighted loss 与 MHA 生命周期不变。这是失败诊断支持的工程实现选择，不宣称已确认作者结构。
+
+正式训练前 `homa.preflight_v3` 在三个训练序列窗口、seed 42/43、真实 AMP/8-window 累积/optimizer 路径上验证 32 次更新可降低 loss；不保存或继承预检权重。正式运行重新初始化。训练记录解析均匀 loss，连续三 epoch 相对均匀基线收益低于 .001 时主动失败，保留当前 checkpoint/logs；新尝试使用新 run。
+
 - 删除外部 256-D bottleneck、residual/LayerNorm 和式 (4) 的额外 sqrt(D) 缩放。SA/CA 直接在各 part 的 2048/4096/2048 维进行，8 heads；ReLU MLP hidden=512。标准 attention 内部 QK scaling 保留。head/fusion 显式 float32，backbone 使用 AMP，避免未缩放点积的 fp16 溢出。
 - 窗口内每帧轮流作为 query，其他帧为候选，排除同帧。按有效同 ID 跨帧 pair 累加三块 CE，再加 fused CE（权重 1），以 pair 数归一化。fused 监督仍为原文未明确的自选项；不是声称修复成了作者原 loss。训练可见窗口内双向 pairs，在线推理仅过去帧；train/val 的 36/12 序列边界不变。
 - MHA 独立实现，原 ByteTrack 控制不改。轨迹置信度取最近匹配 detection 的 score（原文未定义，显式选择）；high 轨迹参与第一阶段，low 轨迹与未匹配 high 中上帧出现者参与 low-IoU 第二阶段。所有未匹配 high 立即出生，无额外 .7 阈值或 unconfirmed 阶段。轨迹观察窗口为 T=8，不再沿用 ByteTrack 的 30 帧 retained-lost 生命周期。第二阶段阈值 .5 保留为固定选择。

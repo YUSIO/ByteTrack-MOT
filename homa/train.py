@@ -2,6 +2,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import random
 import subprocess
 import sys
@@ -24,9 +25,23 @@ def singleton(batch):
     return batch[0]
 
 
+def uniform_window_loss(sample, fused_weight=1.):
+    """Analytic baseline for the all-frame, pair-weighted v2/v3 objective."""
+    ids, frames = sample['all_ids'], sample['all_frames']
+    groups = [set(ids[frames == f].tolist()) for f in frames.unique()]
+    total, count = 0., 0
+    for i, q in enumerate(groups):
+        for j, h in enumerate(groups):
+            if i != j:
+                n = len(q & h)
+                total += n * (3 + fused_weight) * math.log(len(h))
+                count += n
+    return total / max(count, 1)
+
+
 def loss_for(model, sample, device):
     c = sample['crops'].to(device, non_blocking=True)
-    if model.architecture == 'paper_v2':
+    if model.architecture != 'legacy_v1':
         embeddings = model.encode(c)
         return window_association_loss(model, embeddings, sample['all_ids'].to(device),
                                        sample['all_frames'].to(device), model.fused_loss_weight)
@@ -96,10 +111,12 @@ def main():
     print(json.dumps({k:manifest[k] for k in ('train_windows','val_windows','parameters','code_commit','gpu')}),flush=True)
     overflow_skips=0; consecutive_skips=0
     best=float('inf'); epochs=1 if args.smoke else t['epochs']
+    guard=t.get('collapse_guard'); collapse_epochs=0
     for epoch in range(1, epochs+1):
         start=time.time(); model.train(); opt.zero_grad(set_to_none=True)
-        loss_sum=0.; count=0; pending=0; train_limit=min(8,len(train)) if args.smoke else len(train)
+        loss_sum=0.; uniform_sum=0.; count=0; pending=0; train_limit=min(8,len(train)) if args.smoke else len(train)
         for step,sample in enumerate(train_loader,1):
+            if guard: uniform_sum += uniform_window_loss(sample, model.fused_loss_weight)
             with torch.autocast('cuda',enabled=t['amp']):
                 loss,n=loss_for(model,sample,device)
             if not torch.isfinite(loss): raise FloatingPointError(f'nonfinite train loss at {epoch}:{step}')
@@ -125,6 +142,11 @@ def main():
                 val_sum+=float(loss); val_n+=1
                 if args.smoke and step>=2: break
         row={'epoch':epoch,'train_loss':loss_sum/count,'val_loss':val_sum/val_n,'seconds':time.time()-start,'max_cuda_gib':torch.cuda.max_memory_allocated()/1024**3,'amp_overflow_skips':overflow_skips,'loss_scale':scaler.get_scale()}
+        if guard:
+            row['uniform_train_loss']=uniform_sum/count
+            row['relative_train_gain']=1-row['train_loss']/max(row['uniform_train_loss'],1e-12)
+            collapse_epochs=collapse_epochs+1 if row['relative_train_gain']<guard['min_relative_gain'] else 0
+            row['collapse_epochs']=collapse_epochs
         print(json.dumps(row),flush=True)
         with (args.output/'curves.csv').open('a') as f:
             w=csv.DictWriter(f,fieldnames=row.keys())
@@ -137,6 +159,9 @@ def main():
             if row['val_loss']<best:
                 best=row['val_loss']; torch.save(state,args.output/'best.pt'); manifest['best_epoch']=epoch; manifest['best_val_loss']=best
         writer.flush()
+        if guard and collapse_epochs >= guard['patience']:
+            writer.close()
+            raise RuntimeError('uniform-prediction collapse guard: no meaningful gain over baseline')
     writer.close()
     manifest.update(status='completed',finished_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),epochs_completed=epochs)
     manifest['weights']={p.name:sha(p) for p in args.output.glob('*.pt')}
