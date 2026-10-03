@@ -20,3 +20,7 @@
 ## 执行
 
 `python -m homa.train` 是训练入口，`python -m homa.track` 只读检测/图像，`python -m homa.evaluate` 独立读 GT。`homa.run` 拒绝已有 run 目录、记录准确命令/commit/退出码/日志/哈希。`homa.pipeline.sh` 顺序执行训练、验证、冻结 test；任意失败即停止，不自动覆盖或重试。
+
+## 2026-10-03 数值处理修复
+
+run_001 在 epoch 2 遇到非有限梯度并退出。修正 AMP 溢出处理：整次累积跳过 optimizer step，loss scale 减半，参数与 momentum 保持不变，记录跳步；连续 16 次溢出才终止。非有限 forward loss 仍立即失败。新 run 从相同 seed 的 ImageNet 初始化完整重训 30 epochs，不恢复失败 checkpoint；配置、数据划分、loss 和模型结构不变。pipeline 支持显式新起始 run 编号，拒绝覆盖已有目录。

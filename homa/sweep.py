@@ -8,7 +8,7 @@ from .evaluate import evaluate
 
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--root',type=Path,required=True); p.add_argument('--data',type=Path,required=True); p.add_argument('--config',type=Path,required=True); p.add_argument('--checkpoint',type=Path,required=True); p.add_argument('--output',type=Path,required=True); p.add_argument('--selection',type=Path)
+    p=argparse.ArgumentParser(); p.add_argument('--root',type=Path,required=True); p.add_argument('--data',type=Path,required=True); p.add_argument('--config',type=Path,required=True); p.add_argument('--checkpoint',type=Path,required=True); p.add_argument('--output',type=Path,required=True); p.add_argument('--selection',type=Path); p.add_argument('--first-run',type=int,required=True); p.add_argument('--parent',required=True)
     a=p.parse_args(); cfg=json.loads(a.config.read_text()); a.output.mkdir(parents=True,exist_ok=False)
     test=a.selection is not None; split='test' if test else 'train'
     names=sorted(p.name for p in (a.data/'test').glob('UAVSwarm-*') if p.is_dir()) if test else cfg['train']['validation_sequences']
@@ -24,11 +24,11 @@ def main():
     table=[]
     for i,c in enumerate(configs):
         label=f'{i:03d}_{c["arm"]}_T{c["motion_window"]}_k{c["kappa"]}_m{c["match_thresh"]}'
-        run=a.root/'results'/f'run_{(22 if test else 2)+i:03d}'
+        run=a.root/'results'/f'run_{a.first_run+i:03d}'
         out=run/'evaluation'
         cmd=[sys.executable,'-m','homa.track_eval','--data',str(a.data),'--detections',str(det),'--config',str(a.config),'--checkpoint',str(a.checkpoint),'--output',str(out),'--split',split,'--feature-cache',str(a.root/'features'/split),'--sequences',*names]
         for key,value in c.items():cmd.extend(['--'+key.replace('_','-'),str(value)])
-        wrapped=[sys.executable,'-m','homa.run','--run',str(run),'--phase','track_eval' if test else 'validation','--config',str(a.config),'--parent','run_001','--',*cmd]
+        wrapped=[sys.executable,'-m','homa.run','--run',str(run),'--phase','track_eval' if test else 'validation','--config',str(a.config),'--parent',a.parent,'--',*cmd]
         subprocess.run(wrapped,check=True)
         result=json.loads((out/'metrics.json').read_text())
         row={'run':run.name,'label':label,'config':c,'overall':result['overall']}; table.append(row)

@@ -47,6 +47,21 @@ class HomaTests(unittest.TestCase):
         self.assertEqual(len(a.history),1)
         self.assertEqual(t.tracked_stracks[0].homa_feature_frame,1)
 
+    def test_amp_overflow_skips_and_recovers(self):
+        from homa.train import finish_optimizer_step
+        model=torch.nn.Linear(1,1,bias=False)
+        with torch.no_grad(): model.weight.fill_(1.)
+        opt=torch.optim.SGD(model.parameters(),lr=.1,momentum=.9)
+        scaler=torch.amp.GradScaler('cpu',init_scale=8.)
+        scaler.scale(model(torch.tensor([[float('inf')]])).sum()).backward()
+        self.assertTrue(finish_optimizer_step(model,opt,scaler,1,1))
+        self.assertEqual(float(model.weight.detach()),1.)
+        self.assertFalse(opt.state)
+        self.assertEqual(scaler.get_scale(),4.)
+        scaler.scale(model(torch.tensor([[2.]])).sum()).backward()
+        self.assertFalse(finish_optimizer_step(model,opt,scaler,1,1))
+        self.assertAlmostEqual(float(model.weight.detach()),.8,places=6)
+
     def test_model_finite_backward(self):
         torch.set_num_threads(2); torch.manual_seed(42)
         m=MPANet(); m.train()

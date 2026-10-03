@@ -30,6 +30,28 @@ def loss_for(model, sample, device):
     return association_loss(parts, fused, *(sample[k].to(device) for k in ('current_ids','history_ids','history_frames')))
 
 
+def finish_optimizer_step(model, optimizer, scaler, pending, batch_windows):
+    """Skip an overflowing AMP accumulation and lower its scale, never step NaNs."""
+    scaler.unscale_(optimizer)
+    if pending < batch_windows:
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.mul_(batch_windows / pending)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.)
+    skipped = not bool(torch.isfinite(norm))
+    if skipped:
+        if not scaler.is_enabled():
+            raise FloatingPointError('nonfinite gradient with AMP disabled')
+        # Explicit scale update also handles an overflowing norm with finite grads.
+        # No optimizer step: parameters AND momentum buffers stay unchanged.
+        scaler.update(new_scale=scaler.get_scale() / 2.)
+    else:
+        scaler.step(optimizer)
+        scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    return skipped
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--data', type=Path, required=True)
@@ -57,7 +79,7 @@ def main():
     opt = torch.optim.SGD(model.parameters(), lr=t['lr'], momentum=t['momentum'], weight_decay=t['weight_decay'])
     scaler = torch.amp.GradScaler('cuda', enabled=t['amp'])
     writer = SummaryWriter(str(args.tensorboard))
-    manifest = {'status':'running','phase':'preflight' if args.smoke else 'train','python_executable':sys.executable,'python':sys.version,'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(0),'config':cfg,'config_sha256':sha(args.config),'data':str(args.data),'train_windows':len(train),'val_windows':len(val),'parameters':sum(p.numel() for p in model.parameters()),'started_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'code_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'dirty':subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],text=True).strip(),'seed':cfg['seed'],'initial_weights':{},'dataset_files':{}}
+    manifest = {'status':'running','phase':'preflight' if args.smoke else 'train','python_executable':sys.executable,'python':sys.version,'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(0),'config':cfg,'config_sha256':sha(args.config),'data':str(args.data),'train_windows':len(train),'val_windows':len(val),'parameters':sum(p.numel() for p in model.parameters()),'started_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'code_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'dirty':subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],text=True).strip(),'seed':cfg['seed'],'initial_weights':{},'dataset_files':{},'amp_overflow_policy':'skip_optimizer_step_halve_scale_fail_after_16_consecutive'}
     for part in (t['sequences'],t['validation_sequences']):
         for s in part:
             for name in ('seqinfo.ini','gt/gt.txt'):
@@ -67,6 +89,7 @@ def main():
     if init.exists(): manifest['initial_weights']={'url':'https://download.pytorch.org/models/resnet50-0676ba61.pth','sha256':sha(init)}
     (args.output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print(json.dumps({k:manifest[k] for k in ('train_windows','val_windows','parameters','code_commit','gpu')}),flush=True)
+    overflow_skips=0; consecutive_skips=0
     best=float('inf'); epochs=1 if args.smoke else t['epochs']
     for epoch in range(1, epochs+1):
         start=time.time(); model.train(); opt.zero_grad(set_to_none=True)
@@ -78,14 +101,15 @@ def main():
             scaler.scale(loss/t['batch_windows']).backward()
             pending+=1; loss_sum+=float(loss.detach()); count+=1
             if pending==t['batch_windows'] or step==train_limit:
-                scaler.unscale_(opt)
-                # Correct the final partial accumulation to a mean over windows.
-                if pending<t['batch_windows']:
-                    for param in model.parameters():
-                        if param.grad is not None: param.grad.mul_(t['batch_windows']/pending)
-                grad=torch.nn.utils.clip_grad_norm_(model.parameters(),10.)
-                if not torch.isfinite(grad): raise FloatingPointError('nonfinite gradient')
-                scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True); pending=0
+                old_scale = scaler.get_scale()
+                skipped = finish_optimizer_step(model, opt, scaler, pending, t['batch_windows'])
+                pending = 0
+                overflow_skips += int(skipped)
+                consecutive_skips = consecutive_skips + 1 if skipped else 0
+                if skipped:
+                    print(json.dumps({'event':'amp_overflow_skip','epoch':epoch,'window':step,'old_scale':old_scale,'new_scale':scaler.get_scale(),'total_skips':overflow_skips}),flush=True)
+                if consecutive_skips >= 16:
+                    raise FloatingPointError('16 consecutive AMP overflows; training is unstable')
             if step%100==0: print(json.dumps({'epoch':epoch,'window':step,'loss':loss_sum/count,'elapsed_sec':time.time()-start}),flush=True)
             if step>=train_limit: break
         model.eval(); val_sum=0.; val_n=0
@@ -95,7 +119,7 @@ def main():
                 if not torch.isfinite(loss): raise FloatingPointError('nonfinite validation loss')
                 val_sum+=float(loss); val_n+=1
                 if args.smoke and step>=2: break
-        row={'epoch':epoch,'train_loss':loss_sum/count,'val_loss':val_sum/val_n,'seconds':time.time()-start,'max_cuda_gib':torch.cuda.max_memory_allocated()/1024**3}
+        row={'epoch':epoch,'train_loss':loss_sum/count,'val_loss':val_sum/val_n,'seconds':time.time()-start,'max_cuda_gib':torch.cuda.max_memory_allocated()/1024**3,'amp_overflow_skips':overflow_skips,'loss_scale':scaler.get_scale()}
         print(json.dumps(row),flush=True)
         with (args.output/'curves.csv').open('a') as f:
             w=csv.DictWriter(f,fieldnames=row.keys())
