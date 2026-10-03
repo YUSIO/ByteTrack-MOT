@@ -35,6 +35,7 @@ class HOMAAssociation:
 
     @torch.inference_mode()
     def cost(self,tracks,detections):
+        if self.arm=='mha_iou':return matching.iou_distance(tracks,detections)
         if self.arm=='mpa_iou': spatial=1-matching.iou_distance(tracks,detections)
         else: spatial=self.motion_similarity(tracks,detections)
         if self.arm=='m2da':return 1-spatial
@@ -57,10 +58,9 @@ class HOMAAssociation:
         return 1-self.last_similarity
 
     def remember(self,tracks):
-        if self.current is None:return
         entries=[]
         for t in tracks:
-            if getattr(t,'homa_feature_frame',None)==self.frame and t.score>self.high_threshold:
+            if self.current is not None and getattr(t,'homa_feature_frame',None)==self.frame and t.score>self.high_threshold:
                 entries.append((t.track_id,t.homa_feature.detach().cpu()))
         if entries:self.history.append((self.frame,entries))
         active={t.track_id for t in tracks}

@@ -12,6 +12,7 @@ from PIL import Image
 from .model import MPANet
 from .data import crop_tensor, image_path
 from .association import HOMAAssociation
+from .tracker import MHATracker
 from yolox.tracker.byte_tracker import BYTETracker
 from yolox.tracker.basetrack import BaseTrack
 
@@ -21,7 +22,7 @@ def main():
     p.add_argument('--data',type=Path,required=True); p.add_argument('--detections',type=Path,required=True)
     p.add_argument('--config',type=Path,required=True); p.add_argument('--checkpoint',type=Path)
     p.add_argument('--output',type=Path,required=True); p.add_argument('--split',choices=['train','test'],required=True)
-    p.add_argument('--arm',choices=['byte','mpa_iou','m2da','homa'],required=True)
+    p.add_argument('--arm',choices=['byte','mha_iou','mpa_iou','m2da','homa'],required=True)
     p.add_argument('--window',type=int,default=8); p.add_argument('--motion-window',type=int,default=8)
     p.add_argument('--kappa',type=float,default=.1); p.add_argument('--match-thresh',type=float,default=.9)
     p.add_argument('--reduction',choices=['sum','mean'],default='sum'); p.add_argument('--sequences',nargs='+')
@@ -33,7 +34,10 @@ def main():
     if appearance:
         assert args.checkpoint and torch.cuda.is_available()
         cksha=hashlib.file_digest(args.checkpoint.open('rb'),'sha256').hexdigest()
-        model=MPANet().cuda().eval(); model.load_state_dict(torch.load(args.checkpoint,map_location='cpu',weights_only=False)['model'])
+        state=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
+        architecture=state['config']['model'].get('architecture','legacy_v1')
+        assert architecture==cfg['model'].get('architecture','legacy_v1'), 'checkpoint architecture/config mismatch'
+        model=MPANet(architecture=architecture).cuda().eval(); model.load_state_dict(state['model'])
     summary=[]
     for name in names:
         started=time.time(); seq=args.data/args.split/name
@@ -42,7 +46,8 @@ def main():
         detpath=args.detections/name/'det.txt'; raw=np.loadtxt(detpath,delimiter=',',ndmin=2)
         assert np.isfinite(raw).all() and (raw[:,0]>=1).all() and (raw[:,0]<=length).all()
         detsha=hashlib.file_digest(detpath.open('rb'),'sha256').hexdigest()
-        tracker=BYTETracker(SimpleNamespace(**(cfg['tracker']|{'match_thresh':args.match_thresh})),frame_rate=fps); BaseTrack._count=0
+        tracker_class=MHATracker if args.arm!='byte' and cfg.get('lifecycle')=='mha_v2' else BYTETracker
+        tracker=tracker_class(SimpleNamespace(**(cfg['tracker']|{'match_thresh':args.match_thresh})),frame_rate=fps); BaseTrack._count=0
         if args.arm!='byte': tracker.homa=HOMAAssociation(model,args.arm,args.window,args.motion_window,args.kappa,args.reduction,cfg['tracker']['track_thresh'])
         cached={}; cachepath=None
         if appearance and args.feature_cache:
@@ -66,7 +71,7 @@ def main():
                     cached[frame]=features.detach().cpu(); computed=True
                 else:features=torch.empty((0,8192),device='cuda')
                 tracker.homa.set_current(features,frame)
-            elif args.arm=='m2da':tracker.homa.set_current(None,frame)
+            elif args.arm in ('m2da','mha_iou'):tracker.homa.set_current(None,frame)
             tracks=tracker.update(det.copy(),(height,width),(height,width))
             for t in tracks:
                 x,y,w,h=t.tlwh

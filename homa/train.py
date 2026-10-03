@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from .data import Windows
-from .model import MPANet, association_loss
+from .model import MPANet, association_loss, window_association_loss
 
 
 def sha(path):
@@ -26,6 +26,10 @@ def singleton(batch):
 
 def loss_for(model, sample, device):
     c = sample['crops'].to(device, non_blocking=True)
+    if model.architecture == 'paper_v2':
+        embeddings = model.encode(c)
+        return window_association_loss(model, embeddings, sample['all_ids'].to(device),
+                                       sample['all_frames'].to(device), model.fused_loss_weight)
     parts, fused = model(c, sample['n_current'])
     return association_loss(parts, fused, *(sample[k].to(device) for k in ('current_ids','history_ids','history_frames')))
 
@@ -75,7 +79,8 @@ def main():
     def loader(ds, shuffle):
         return DataLoader(ds, batch_size=1, shuffle=shuffle, collate_fn=singleton, num_workers=t['workers'], pin_memory=True, persistent_workers=t['workers'] > 0, generator=torch.Generator().manual_seed(cfg['seed']))
     train_loader, val_loader = loader(train, True), loader(val, False)
-    model = MPANet(pretrained=True).to(device)
+    model = MPANet(pretrained=True, architecture=cfg['model'].get('architecture','legacy_v1')).to(device)
+    model.fused_loss_weight = t.get('fused_loss_weight', 1.)
     opt = torch.optim.SGD(model.parameters(), lr=t['lr'], momentum=t['momentum'], weight_decay=t['weight_decay'])
     scaler = torch.amp.GradScaler('cuda', enabled=t['amp'])
     writer = SummaryWriter(str(args.tensorboard))

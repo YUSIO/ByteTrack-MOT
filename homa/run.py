@@ -19,7 +19,11 @@ def main():
     a.run.mkdir(parents=True,exist_ok=False)
     dirty=subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],text=True).strip()
     if dirty:raise RuntimeError('formal code working tree is dirty')
+    protocol=json.loads(a.config.read_text())
     meta={'schema_version':1,'phase':a.phase,'status':'running','started_utc':utc(),'parent_run':a.parent,'command':command,'repository':'git@github.com:YUSIO/ByteTrack-MOT.git','branch':'exp/042-homatracker-yolo11s','commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'dirty':dirty,'base_commit':'758f44efe2fca50188e1a697013db8d819ad306c','upstream_commit':'d1bf0191adff59bc8fcfeaa0b33d3d1642552a99','input_manifest_sha256':hashlib.sha256((a.config.parent/'manifest.json').read_bytes()).hexdigest(),'config_sha256':hashlib.sha256(a.config.read_bytes()).hexdigest(),'python_executable':sys.executable,'python':sys.version,'platform':platform.platform(),'host':platform.node(),'pid':os.getpid()}
+    meta['branch']=protocol.get('code_branch',meta['branch'])
+    meta['protocol_version']=protocol.get('protocol_version','v1')
+    meta['base_commit']=protocol.get('base_commit',meta['base_commit'])
     (a.run/'command.txt').write_text(shlex.join(command)+'\n')
     (a.run/'manifest.yaml').write_text(json.dumps(meta,indent=2)+'\n')
     (a.run/'environment.txt').write_text(subprocess.check_output([sys.executable,'-m','pip','freeze'],text=True))

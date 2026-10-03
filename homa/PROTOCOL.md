@@ -24,3 +24,14 @@
 ## 2026-10-03 数值处理修复
 
 run_001 在 epoch 2 遇到非有限梯度并退出。修正 AMP 溢出处理：整次累积跳过 optimizer step，loss scale 减半，参数与 momentum 保持不变，记录跳步；连续 16 次溢出才终止。非有限 forward loss 仍立即失败。新 run 从相同 seed 的 ImageNet 初始化完整重训 30 epochs，不恢复失败 checkpoint；配置、数据划分、loss 和模型结构不变。pipeline 支持显式新起始 run 编号，拒绝覆盖已有目录。
+
+## v2_repair：2026-10-03 实现审计后的修订
+
+本节仅用于 `architecture=paper_v2` / `lifecycle=mha_v2`，旧 checkpoint 使用 `legacy_v1` 路径。v1 运行不可在 v2 代码上无条件重演，应 checkout 各 run 原 SHA。
+
+- 删除外部 256-D bottleneck、residual/LayerNorm 和式 (4) 的额外 sqrt(D) 缩放。SA/CA 直接在各 part 的 2048/4096/2048 维进行，8 heads；ReLU MLP hidden=512。标准 attention 内部 QK scaling 保留。head/fusion 显式 float32，backbone 使用 AMP，避免未缩放点积的 fp16 溢出。
+- 窗口内每帧轮流作为 query，其他帧为候选，排除同帧。按有效同 ID 跨帧 pair 累加三块 CE，再加 fused CE（权重 1），以 pair 数归一化。fused 监督仍为原文未明确的自选项；不是声称修复成了作者原 loss。训练可见窗口内双向 pairs，在线推理仅过去帧；train/val 的 36/12 序列边界不变。
+- MHA 独立实现，原 ByteTrack 控制不改。轨迹置信度取最近匹配 detection 的 score（原文未定义，显式选择）；high 轨迹参与第一阶段，low 轨迹与未匹配 high 中上帧出现者参与 low-IoU 第二阶段。所有未匹配 high 立即出生，无额外 .7 阈值或 unconfirmed 阶段。轨迹观察窗口为 T=8，不再沿用 ByteTrack 的 30 帧 retained-lost 生命周期。第二阶段阈值 .5 保留为固定选择。
+- 增加 `mha_iou` 控制分离生命周期效应。验证共 22 configs：byte/mha_iou/mpa_iou 各 2，m2da/homa 各 8。motion T=8、κ=.1 是原文形式参考；κ=200 属迁移变体，T=2 是单次预测控制。两者不得冒充原文参数或多帧收益。MPA T=8 有原文 UAVSwarm 消融依据。
+- 从 ImageNet 初始化重训 30 epoch，不恢复 v1 权重；seed、SGD 与数据不变。只运行训练及 validation，`HOMA_RUN_TEST=0`。先核验 head 与 lifecycle，再决定新的冻结 test；不按已有 test 结果调参。
+- 尚未确认作者代码；ResNet50 stage/projection、head 数、hidden size、融合监督、confidence 语义仍为明确的独立实现选择。本修订为验证修复假设，不能预先称为忠实复现成功。

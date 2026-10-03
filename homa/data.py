@@ -72,4 +72,4 @@ class Windows(Dataset):
             ids.extend(r[:, 1].astype(int))
             frames.extend([h] * len(r))
         nc = len(fm[f])
-        return {'crops':torch.cat(crops), 'n_current':nc, 'current_ids':torch.tensor(ids[:nc]), 'history_ids':torch.tensor(ids[nc:]), 'history_frames':torch.tensor(frames[nc:]), 'sequence':name, 'frame':f}
+        return {'crops':torch.cat(crops), 'n_current':nc, 'current_ids':torch.tensor(ids[:nc]), 'history_ids':torch.tensor(ids[nc:]), 'history_frames':torch.tensor(frames[nc:]), 'all_ids':torch.tensor(ids), 'all_frames':torch.tensor(frames), 'sequence':name, 'frame':f}
