@@ -55,9 +55,9 @@ def main():
         output=[]; computed=False
         for frame in range(1,length+1):
             r=raw[raw[:,0]==frame]
-            det=np.column_stack((r[:,2:4],r[:,2:4]+r[:,4:6],r[:,6])).astype(np.float64)
+            det=np.column_stack((r[:,2:4],r[:,2:4]+r[:,4:6],r[:,6])).astype(np.float32)
             if appearance:
-                high=r[r[:,6]>cfg['tracker']['track_thresh']]
+                high=r[det[:,4]>cfg['tracker']['track_thresh']]
                 if frame in cached:
                     features=cached[frame].cuda()
                 elif len(high):
