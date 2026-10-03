@@ -74,6 +74,9 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        if hasattr(new_track, "homa_feature"):
+            self.homa_feature = new_track.homa_feature
+            self.homa_feature_frame = frame_id
 
     def update(self, new_track, frame_id):
         """
@@ -93,6 +96,9 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        if hasattr(new_track, "homa_feature"):
+            self.homa_feature = new_track.homa_feature
+            self.homa_feature_frame = frame_id
 
     @property
     # @jit(nopython=True)
@@ -198,6 +204,14 @@ class BYTETracker(object):
         else:
             detections = []
 
+        homa = getattr(self, 'homa', None)
+        if homa is not None and homa.current is not None:
+            if len(homa.current) != len(detections):
+                raise ValueError('high-score feature count mismatch')
+            for det, feature in zip(detections, homa.current):
+                det.homa_feature = feature
+                det.homa_feature_frame = self.frame_id
+
         ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
@@ -213,7 +227,9 @@ class BYTETracker(object):
         STrack.multi_predict(strack_pool)
         # Default 'iou' is upstream ByteTrack; 'm2da' follows HOMATracker Eqs. (9)-(13).
         first_stage_cost = getattr(self.args, 'first_stage_cost', 'iou')
-        if first_stage_cost == 'iou':
+        if homa is not None:
+            dists = homa.cost(strack_pool, detections)
+        elif first_stage_cost == 'iou':
             dists = matching.iou_distance(strack_pool, detections)
         elif first_stage_cost == 'm2da':
             for track in strack_pool:
@@ -221,7 +237,7 @@ class BYTETracker(object):
             dists = matching.m2da_distance(strack_pool, detections, self.args.m2da_kappa)
         else:
             raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
-        if not self.args.mot20:
+        if homa is None and not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
@@ -302,6 +318,8 @@ class BYTETracker(object):
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
+        if homa is not None:
+            homa.remember(self.tracked_stracks + self.lost_stracks)
         return output_stracks
 
 
