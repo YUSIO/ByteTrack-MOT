@@ -56,6 +56,16 @@ def parse_args():
     parser.add_argument("--affinity-min-probability", type=float, default=0.5)
     parser.add_argument("--affinity-apply-to", choices=("all", "tracked", "lost"), default="all",
                         help="restrict the affinity cost adjustment to Tracked or Lost track rows (attribution)")
+    parser.add_argument("--lost-projection", choices=("off", "shadow", "apply"), default="off",
+                        help="neighbour-projected state for Lost tracks; shadow only traces it (Exp044)")
+    parser.add_argument("--lost-projection-base", choices=("innov", "follow"), default="innov")
+    parser.add_argument("--lost-projection-transform", choices=("sim", "trans"), default="sim")
+    parser.add_argument("--lost-projection-neighbors", type=int, default=3, help="nearest anchors used; 0 uses all")
+    parser.add_argument("--lost-projection-ttl", type=int, default=6)
+    parser.add_argument("--lost-projection-min-anchors", type=int, default=2)
+    parser.add_argument("--lost-projection-max-residual", type=float, default=0.04,
+                        help="median anchor residual limit as a fraction of the image diagonal")
+    parser.add_argument("--lost-projection-trace-dir", type=Path)
     return parser.parse_args()
 
 
@@ -114,6 +124,19 @@ def track_sequence(sequence_dir, output_dir, args):
         )
     else:
         args.association_adjuster = None
+    if args.lost_projection != "off":
+        from yolox.tracker.lost_projection import LostProjector
+        trace_path = None
+        if args.lost_projection_trace_dir is not None:
+            args.lost_projection_trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = args.lost_projection_trace_dir / f"{info['name']}.jsonl"
+        args.lost_projector = LostProjector(
+            args.lost_projection, args.lost_projection_base, args.lost_projection_transform,
+            args.lost_projection_neighbors, args.lost_projection_ttl, args.lost_projection_min_anchors,
+            args.lost_projection_max_residual, info["width"], info["height"], trace_path,
+        )
+    else:
+        args.lost_projector = None
     tracker = BYTETracker(args, frame_rate=info["frame_rate"])
     result_rows = []
     input_count = 0
@@ -136,6 +159,8 @@ def track_sequence(sequence_dir, output_dir, args):
             if width * height > args.min_box_area and not is_vertical:
                 result_rows.append((frame, target.track_id, x, y, width, height, target.score))
 
+    if args.lost_projector is not None:
+        args.lost_projector.close()
     write_sequence_results(output_dir / f"{info['name']}.txt", result_rows)
     return {
         "input_detection_rows": input_count,
@@ -174,6 +199,13 @@ def main():
             "affinity_weight": args.affinity_weight if args.affinity_checkpoint else None,
             "affinity_min_probability": args.affinity_min_probability if args.affinity_checkpoint else None,
             "affinity_apply_to": args.affinity_apply_to if args.affinity_checkpoint else None,
+            "lost_projection": args.lost_projection,
+            "lost_projection_base": args.lost_projection_base if args.lost_projection != "off" else None,
+            "lost_projection_transform": args.lost_projection_transform if args.lost_projection != "off" else None,
+            "lost_projection_neighbors": args.lost_projection_neighbors if args.lost_projection != "off" else None,
+            "lost_projection_ttl": args.lost_projection_ttl if args.lost_projection != "off" else None,
+            "lost_projection_min_anchors": args.lost_projection_min_anchors if args.lost_projection != "off" else None,
+            "lost_projection_max_residual": args.lost_projection_max_residual if args.lost_projection != "off" else None,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,

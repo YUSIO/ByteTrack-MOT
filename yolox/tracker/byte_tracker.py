@@ -204,8 +204,13 @@ class BYTETracker(object):
 
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
+        projector = getattr(self.args, "lost_projector", None)
+        if projector is not None:
+            projector.begin_frame(strack_pool)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
+        if projector is not None:
+            projector.after_predict(strack_pool, self.frame_id)
         dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
@@ -216,6 +221,8 @@ class BYTETracker(object):
         if adjuster is not None:
             dists = adjuster("primary", strack_pool, detections, dists, self.frame_id)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        if projector is not None:
+            projector.after_first_association(strack_pool, detections, matches, self.frame_id)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -291,6 +298,8 @@ class BYTETracker(object):
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        if projector is not None:
+            projector.end_frame(self.lost_stracks, self.frame_id)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
