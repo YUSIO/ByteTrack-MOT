@@ -81,6 +81,9 @@ def main():
         if cachepath and computed:
             torch.save({'checkpoint_sha256':cksha,'detector_sha256':detsha,'frames':cached},cachepath)
         summary.append({'sequence':name,'frames':length,'detections':len(raw),'rows':len(output),'seconds':time.time()-started,'detector_sha256':detsha,'track_sha256':hashlib.file_digest((args.output/f'{name}.txt').open('rb'),'sha256').hexdigest()})
+        if isinstance(tracker,MHATracker):
+            summary[-1]['lifecycle_counts']=dict(tracker.audit_counts)
+            summary[-1]['excluded_low_events']=tracker.audit_events
         print(json.dumps(summary[-1]),flush=True)
     (args.output/'summary.json').write_text(json.dumps({'args':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},'checkpoint_sha256':cksha,'gt_read':False,'sequences':summary},indent=2)+'\n')
 
