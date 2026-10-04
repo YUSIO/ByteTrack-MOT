@@ -236,6 +236,10 @@ class Trainer:
                 ["{}: {:.3f}".format(k, v.latest) for k, v in loss_meter.items()]
             )
 
+            if self.rank == 0:
+                for k, v in loss_meter.items():
+                    self.tblogger.add_scalar("train/" + k, v.latest, self.progress_in_iter + 1)
+                self.tblogger.add_scalar("train/lr", self.meter["lr"].latest, self.progress_in_iter + 1)
             time_meter = self.meter.get_filtered_meter("time")
             time_str = ", ".join(
                 ["{}: {:.3f}s".format(k, v.avg) for k, v in time_meter.items()]
