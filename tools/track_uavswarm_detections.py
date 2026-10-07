@@ -66,6 +66,9 @@ def parse_args():
     parser.add_argument("--lost-projection-max-residual", type=float, default=0.04,
                         help="median anchor residual limit as a fraction of the image diagonal")
     parser.add_argument("--lost-projection-trace-dir", type=Path)
+    parser.add_argument("--gmc-dir", type=Path,
+                        help="directory with <sequence>.txt camera-motion files: frame a b tx c d ty per row, "
+                             "mapping frame-1 to frame; applied to every predicted track state")
     return parser.parse_args()
 
 
@@ -137,6 +140,10 @@ def track_sequence(sequence_dir, output_dir, args):
         )
     else:
         args.lost_projector = None
+    args.gmc_warps = {}
+    if args.gmc_dir is not None:
+        for row in np.loadtxt(args.gmc_dir / f"{info['name']}.txt", ndmin=2):
+            args.gmc_warps[int(row[0])] = row[1:7].reshape(2, 3)
     tracker = BYTETracker(args, frame_rate=info["frame_rate"])
     result_rows = []
     input_count = 0

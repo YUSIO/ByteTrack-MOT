@@ -42,6 +42,25 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
+    @staticmethod
+    def multi_gmc(stracks, warp):
+        """Move predicted states by the camera motion (BoT-SORT GMC, written for the xyah state).
+
+        ``warp`` is the 2x3 similarity mapping image points of the previous frame to the current one.
+        Centre and velocity go through its linear part, height and its velocity through its scale;
+        the covariance is transformed with the same Jacobian.
+        """
+        linear, shift = warp[:, :2], warp[:, 2]
+        scale = float(np.sqrt(abs(np.linalg.det(linear))))
+        jac = np.eye(8)
+        jac[0:2, 0:2] = linear
+        jac[4:6, 4:6] = linear
+        jac[3, 3] = jac[7, 7] = scale
+        for st in stracks:
+            st.mean = jac @ st.mean
+            st.mean[:2] += shift
+            st.covariance = jac @ st.covariance @ jac.T
+
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet"""
         self.kalman_filter = kalman_filter
@@ -209,6 +228,10 @@ class BYTETracker(object):
             projector.begin_frame(strack_pool)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
+        warp = getattr(self.args, "gmc_warps", {}).get(self.frame_id)
+        if warp is not None:
+            STrack.multi_gmc(strack_pool, warp)
+            STrack.multi_gmc(unconfirmed, warp)
         if projector is not None:
             projector.after_predict(strack_pool, self.frame_id)
         dists = matching.iou_distance(strack_pool, detections)
