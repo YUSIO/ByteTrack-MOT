@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
+from yolox.tracker import birth as birth_policy
 from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
@@ -212,6 +213,18 @@ class BYTETracker(object):
                 det.homa_feature = feature
                 det.homa_feature_frame = self.frame_id
 
+        birth = getattr(self.args, 'birth', None)
+        hook = getattr(self, 'birth_hook', None)
+        anchors = []  # (previous observed centre, displacement) of tracks observed in this frame and the one before
+
+        def note(track, det):
+            if birth is not None and getattr(track, 'last_obs_frame', -1) == self.frame_id - 1:
+                c0 = birth_policy.centre(track.last_obs)
+                track.last_disp = birth_policy.centre(det._tlwh) - c0
+                if track.is_activated:
+                    anchors.append((c0, track.last_disp))
+            track.last_obs, track.last_obs_frame = det._tlwh.copy(), self.frame_id
+
         ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
@@ -244,6 +257,7 @@ class BYTETracker(object):
         for itracked, idet in matches:
             track = strack_pool[itracked]
             det = detections[idet]
+            note(track, det)
             if track.state == TrackState.Tracked:
                 track.update(detections[idet], self.frame_id)
                 activated_starcks.append(track)
@@ -265,6 +279,7 @@ class BYTETracker(object):
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
+            note(track, det)
             if track.state == TrackState.Tracked:
                 track.update(det, self.frame_id)
                 activated_starcks.append(track)
@@ -278,27 +293,82 @@ class BYTETracker(object):
                 track.mark_lost()
                 lost_stracks.append(track)
 
-        '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
-        detections = [detections[i] for i in u_detection]
-        dists = matching.iou_distance(unconfirmed, detections)
-        if not self.args.mot20:
-            dists = matching.fuse_score(dists, detections)
-        matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
-        for itracked, idet in matches:
-            unconfirmed[itracked].update(detections[idet], self.frame_id)
-            activated_starcks.append(unconfirmed[itracked])
-        for it in u_unconfirmed:
-            track = unconfirmed[it]
-            track.mark_removed()
-            removed_stracks.append(track)
+        if birth is None and hook is None:
+            '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
+            detections = [detections[i] for i in u_detection]
+            dists = matching.iou_distance(unconfirmed, detections)
+            if not self.args.mot20:
+                dists = matching.fuse_score(dists, detections)
+            matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
+            for itracked, idet in matches:
+                unconfirmed[itracked].update(detections[idet], self.frame_id)
+                activated_starcks.append(unconfirmed[itracked])
+            for it in u_unconfirmed:
+                track = unconfirmed[it]
+                track.mark_removed()
+                removed_stracks.append(track)
 
-        """ Step 4: Init new stracks"""
-        for inew in u_detection:
-            track = detections[inew]
-            if track.score < self.det_thresh:
-                continue
-            track.activate(self.kalman_filter, self.frame_id)
-            activated_starcks.append(track)
+            """ Step 4: Init new stracks"""
+            for inew in u_detection:
+                track = detections[inew]
+                if track.score < self.det_thresh:
+                    continue
+                track.activate(self.kalman_filter, self.frame_id)
+                activated_starcks.append(track)
+        else:
+            cfg = birth or {}
+            weak_low = cfg.get('weak_low')
+            pool = [detections[i] for i in u_detection]
+            n_match = len(pool)  # unconfirmed tracks are matched against the left-over high-score boxes, as upstream ...
+            if weak_low is not None:
+                pool += [detections_second[i] for i in u_detection_second if detections_second[i].score > weak_low]
+                if cfg.get('confirm_pool', 'high') == 'all':  # ... or also against the left-over low-score boxes
+                    n_match = len(pool)
+            if cfg.get('shift', 'none') != 'none':
+                moved = birth_policy.shifts(unconfirmed, anchors, cfg, (getattr(self, 'camera_motion', None) or {}).get(self.frame_id))
+                for track, d in zip(unconfirmed, moved):
+                    track.mean[:2] += d
+                    if cfg.get('inherit_velocity', True):
+                        track.mean[4:6] = d
+            dists = 1 - birth_policy.similarity(unconfirmed, pool[:n_match], cfg)
+            matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=1 - cfg.get('gate', 0.3))
+            u_detection = list(u_detection) + list(range(n_match, len(pool)))
+            if hook is not None:
+                matches, u_unconfirmed, u_detection = hook.confirm(self, unconfirmed, pool, matches, u_unconfirmed, u_detection)
+            for itracked, idet in matches:
+                track = unconfirmed[itracked]
+                note(track, pool[idet])
+                track.update(pool[idet], self.frame_id)
+                track.need_hits = getattr(track, 'need_hits', 1) - 1
+                track.is_activated = track.need_hits <= 0
+                activated_starcks.append(track)
+            for it in u_unconfirmed:
+                track = unconfirmed[it]
+                track.mark_removed()
+                removed_stracks.append(track)
+
+            """ Step 4: Init new stracks"""
+            seen = [t.tlbr for t in activated_starcks + refind_stracks]
+            for inew in u_detection:
+                track = pool[inew]
+                strong = track.score >= self.det_thresh
+                decision = hook.birth(self, track, strong) if hook is not None else 'default'
+                if decision == 'skip':
+                    continue
+                if decision == 'default':
+                    if not strong:
+                        if weak_low is None or track.score <= weak_low:
+                            continue
+                        if seen and matching.ious(np.ascontiguousarray([track.tlbr], dtype=float), np.ascontiguousarray(seen, dtype=float)).max() > cfg.get('weak_free_iou', 0.3):
+                            continue
+                track.activate(self.kalman_filter, self.frame_id)
+                track.last_obs, track.last_obs_frame = track._tlwh.copy(), self.frame_id
+                track.need_hits = 1 if strong else cfg.get('weak_hits', 2)
+                if decision == 'now' or (strong and cfg.get('instant', False)):
+                    track.is_activated, track.need_hits = True, 0
+                elif not strong:
+                    track.is_activated = False  # also in the first frame, where upstream activates every new track
+                activated_starcks.append(track)
         """ Step 5: Update state"""
         for track in self.lost_stracks:
             if self.frame_id - track.end_frame > self.max_time_lost:
