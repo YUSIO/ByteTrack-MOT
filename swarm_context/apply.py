@@ -2,6 +2,9 @@
 
 Writes <out>/<name>/det.txt with the same boxes and the new scores. Boxes below the model's minimum score, or beyond
 its per-frame cap, are not written (they are below anything a tracker reads). Annotations are not read.
+
+A model trained with app_mode "other" (control) compares a box with the confident boxes of the next sample of the
+batch; here every frame is therefore paired with a random frame of another sequence of the spec.
 """
 import argparse
 import json
@@ -34,18 +37,34 @@ def main():
         model.scope = a.scope
     k = state["cfg"]["k"]
     summary = {}
-    for s in json.loads(a.spec.read_text()):
+    spec = json.loads(a.spec.read_text())
+    load = lambda s: Sequence(s["name"], s["det"], s["seq_dir"], state["min_score"], state["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None, labelled=False,
+                              feat_file=s["feat"] if state["cfg"].get("app") else None)
+    other = state["cfg"].get("app") and state["cfg"].get("app_mode") == "other"
+    donors = {s["name"]: load(s) for s in spec} if other else {}
+    rng = np.random.default_rng(0)
+    for s in spec:
         if a.roles and s.get("role") not in a.roles:
             continue
-        seq = Sequence(s["name"], s["det"], s["seq_dir"], state["min_score"], state["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None, labelled=False,
-                       feat_file=s["feat"] if state["cfg"].get("app") else None)
+        seq = donors.get(s["name"]) or load(s)
         rows = []
         frames = list(range(seq.first, seq.last + 1))
         for i in range(0, len(frames), a.batch):
             chunk = frames[i:i + a.batch]
-            b = collate([seq.window(f, k) for f in chunk])
+            windows = [seq.window(f, k) for f in chunk]
+            if other:  # sample j of the model's batch reads sample j - 1: put a frame of another sequence before every frame
+                names = [n for n in donors if n != s["name"]]
+                mixed = []
+                for w in windows:
+                    d = donors[names[rng.integers(len(names))]]
+                    mixed += [d.window(int(rng.integers(d.first, d.last + 1)), k), w]
+                windows = mixed
+            b = collate(windows)
             b = {key: v.to(a.device) for key, v in b.items()}
             p = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"], b.get("feat")))
+            if other:
+                b = {key: v[1::2] for key, v in b.items()}
+                p = p[1::2]
             for j, f in enumerate(chunk):
                 sel = (b["valid"][j] & (b["step"][j] == 0)).cpu().numpy()
                 box, new = b["box"][j].cpu().numpy()[sel], p[j].float().cpu().numpy()[sel]
