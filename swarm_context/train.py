@@ -69,12 +69,16 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--scope", default="all", choices=["all", "tube", "peers"])
     ap.add_argument("--k", type=int, default=8)
-    ap.add_argument("--d", type=int, default=96)
+    ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
-    ap.add_argument("--drop", type=float, default=0.1)
+    ap.add_argument("--drop", type=float, default=0.2)
+    ap.add_argument("--key-drop", type=float, default=0.15)
+    ap.add_argument("--node-abs", type=int, default=0)
+    ap.add_argument("--peer-dir", type=int, default=0)
+    ap.add_argument("--epoch-size", type=int, default=6000, help="windows per epoch, sampled so that every sequence counts the same")
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--batch", type=int, default=48)
+    ap.add_argument("--batch", type=int, default=24)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--band-weight", type=float, default=3.0)
@@ -90,13 +94,16 @@ def main():
     seqs = {"train": [], "val": []}
     for s in spec:
         seqs[s["role"]].append(Sequence(s["name"], s["det"], s["seq_dir"], a.min_score, a.max_per_frame, tuple(s["frames"]) if s.get("frames") else None))
-    tr = torch.utils.data.DataLoader(Windows(seqs["train"], a.k, True, a.seed), batch_size=a.batch, shuffle=True, collate_fn=collate, num_workers=4, drop_last=True)
+    train_set = Windows(seqs["train"], a.k, True, a.seed)
+    per_seq = np.bincount([i for i, _ in train_set.index])
+    sampler = torch.utils.data.WeightedRandomSampler([1.0 / per_seq[i] for i, _ in train_set.index], num_samples=a.epoch_size, replacement=True)
+    tr = torch.utils.data.DataLoader(train_set, batch_size=a.batch, sampler=sampler, collate_fn=collate, num_workers=4, drop_last=True)
     va = torch.utils.data.DataLoader(Windows(seqs["val"], a.k, False), batch_size=a.batch, shuffle=False, collate_fn=collate, num_workers=4)
-    model = SwarmContext(k=a.k, d=a.d, heads=a.heads, layers=a.layers, drop=a.drop, scope=a.scope).to(a.device)
+    model = SwarmContext(k=a.k, d=a.d, heads=a.heads, layers=a.layers, drop=a.drop, scope=a.scope, node_abs=bool(a.node_abs), peer_dir=bool(a.peer_dir), key_drop=a.key_drop).to(a.device)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.wd)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=a.epochs * len(tr), pct_start=0.1)
     (a.out / "args.json").write_text(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()}, indent=1) + "\n")
-    log, best = open(a.out / "log.jsonl", "w"), -1.0
+    log, best, best_tp = open(a.out / "log.jsonl", "w"), -1.0, -1
     base = evaluate(model, va, a.device)
     log.write(json.dumps({"epoch": 0, "val": base}) + "\n")
     print("epoch 0", json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in base.items()}), flush=True)
@@ -126,6 +133,9 @@ def main():
         if val["ap_band_new"] > best:
             best = val["ap_band_new"]
             torch.save(state, a.out / "best.pt")
+        if val["at_0.6"]["true_new"] > best_tp:
+            best_tp = val["at_0.6"]["true_new"]
+            torch.save(state, a.out / "best_tp.pt")
     print("done", flush=True)
 
 

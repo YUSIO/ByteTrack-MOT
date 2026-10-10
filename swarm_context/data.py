@@ -60,16 +60,20 @@ class Sequence:
             self.gid[f] = np.where(who >= 0, g[np.clip(who, 0, None), 1].astype(np.int64) if len(g) else -1, -1)
         self.raw = raw
 
-    def window(self, t, k, stride=1):
-        """Boxes of frames t - k*stride .. t (those that exist). Returns arrays over all tokens of the window."""
-        fs = [f for f in range(t - k * stride, t + 1, stride) if self.first <= f <= self.last]
+    def window(self, t, k, stride=1, reverse=False):
+        """Boxes of frames t - k*stride .. t (those that exist). Returns arrays over all tokens of the window.
+
+        reverse (augmentation) takes frames t .. t + k*stride and plays them backwards, so that t is still the last one.
+        """
+        sign = -1 if reverse else 1
+        fs = [f for f in range(t - sign * k * stride, t + sign, sign * stride) if self.first <= f <= self.last]
         box = np.concatenate([self.det[f] for f in fs]) if fs else np.zeros((0, 5), np.float32)
-        step = np.concatenate([np.full(len(self.det[f]), (f - t) // stride) for f in fs]) if fs else np.zeros(0)
+        step = np.concatenate([np.full(len(self.det[f]), -abs(f - t) // stride) for f in fs]) if fs else np.zeros(0)
         lab = np.concatenate([self.lab[f] for f in fs]) if fs else np.zeros(0)
         return {"box": box, "step": step.astype(np.int64), "lab": lab.astype(np.int64), "wh": np.array([self.width, self.height], np.float32)}
 
 
-def augment(w, rng, flip=0.5, drop=0.05, score_noise=0.15):
+def augment(w, rng, flip=0.5, drop=0.1, score_noise=0.15):
     box = w["box"].copy()
     if rng.random() < flip:
         box[:, 0] = w["wh"][0] - box[:, 0] - box[:, 2]
@@ -107,4 +111,4 @@ class Windows(torch.utils.data.Dataset):
         if not self.train:
             return self.seqs[i].window(f, self.k)
         stride = 2 if self.rng.random() < self.stride2 else 1
-        return augment(self.seqs[i].window(f, self.k, stride), self.rng)
+        return augment(self.seqs[i].window(f, self.k, stride, reverse=self.rng.random() < 0.5), self.rng)
