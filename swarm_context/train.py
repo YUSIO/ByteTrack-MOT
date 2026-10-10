@@ -67,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--scope", default="all", choices=["all", "tube", "peers"])
+    ap.add_argument("--scope", default="all", choices=["all", "tube", "peers", "self"])
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--layers", type=int, default=3)
@@ -85,6 +85,7 @@ def main():
     ap.add_argument("--max-per-frame", type=int, default=48)
     ap.add_argument("--min-score", type=float, default=0.01)
     ap.add_argument("--app-mode", default="none", choices=["none", "peer", "hist", "peer+hist", "other"], help="how the detector's box features are used (needs feat in the spec)")
+    ap.add_argument("--eval-every", type=int, default=1, help="validate every this many epochs (always after the last)")
     ap.add_argument("--r0", type=float, default=2.0)
     ap.add_argument("--r1", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
@@ -137,6 +138,9 @@ def main():
             opt.step()
             sched.step()
             tot, n = tot + float(loss), n + 1
+        if epoch % a.eval_every and epoch != a.epochs:
+            print(f"epoch {epoch} loss {tot / n:.4f} ({round(time.time() - t0, 1)}s)", flush=True)
+            continue
         val = evaluate(model, va, a.device)
         rec = {"epoch": epoch, "loss": tot / n, "seconds": round(time.time() - t0, 1), "val": val}
         log.write(json.dumps(rec) + "\n")

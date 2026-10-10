@@ -11,13 +11,16 @@ direction (peer_dir=False); during training a share of the other boxes is hidden
 With app > 0 every box also carries the detector's feature at its centre (app channels). It is used only through
 similarities under a learned embedding: how much the box looks like the confident boxes (score >= app_thr) outside its
 own neighbourhood (the other members of the swarm: "peer") and like the confident boxes inside it (its own earlier
-boxes: "hist"). The raw feature never enters the model, so it cannot recognise the scene. app_mode "other" replaces the
-swarm's own members by the confident boxes of another sample of the batch (control: generic targets, not this swarm).
+boxes: "hist"). The raw feature never enters the model, so it cannot recognise the scene, and the similarities do not
+pass through the attention layers: a small separate head turns them into a second correction that is added to the
+output. app_mode "other" replaces the swarm's own members by the confident boxes of another sample of the batch
+(control: generic targets, not this swarm).
 
 scope selects which other tokens a token may see:
   all    every box of the window (swarm context)
   tube   only boxes close to it (distance <= r0 + r1 * frames apart, in its own box sides): its own history and duplicates
   peers  only boxes outside that neighbourhood, plus itself
+  self   nothing but itself (no context: a per-box recalibration of the score)
 """
 import torch
 import torch.nn as nn
@@ -103,11 +106,14 @@ class SwarmContext(nn.Module):
         self.app, self.app_mode, self.app_thr = app, app_mode, app_thr
         if app:
             self.embed = nn.Sequential(nn.Dropout(app_drop), nn.Linear(app, app_e))
+            self.app_head = nn.Sequential(nn.Linear(9, 32), nn.GELU(), nn.Linear(32, 1))
+            nn.init.zeros_(self.app_head[-1].weight)
+            nn.init.zeros_(self.app_head[-1].bias)
             self.register_buffer("app_mu", torch.zeros(app))
             self.register_buffer("app_sd", torch.ones(app))
         self.k, self.scope, self.r0, self.r1 = k, scope, r0, r1
         self.node_abs, self.peer_dir, self.key_drop = node_abs, peer_dir, key_drop
-        self.node = nn.Sequential(nn.Linear(NODE + (8 if app else 0), d), nn.GELU(), nn.Linear(d, d))
+        self.node = nn.Sequential(nn.Linear(NODE, d), nn.GELU(), nn.Linear(d, d))
         self.edge = nn.Sequential(nn.Linear(EDGE, de), nn.GELU(), nn.Linear(de, de))
         self.layers = nn.ModuleList([Layer(d, de, heads, drop) for _ in range(layers)])
         self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
@@ -136,6 +142,8 @@ class SwarmContext(nn.Module):
             allow = allow & near
         elif self.scope == "peers":
             allow = allow & ~near
+        elif self.scope == "self":
+            allow = allow & eye
         if self.training and self.key_drop > 0:
             allow = allow & (torch.rand_like(dist) >= self.key_drop)
         allow = allow | eye
@@ -144,9 +152,10 @@ class SwarmContext(nn.Module):
         if not self.peer_dir:  # outside the neighbourhood only the distance is kept, not the direction
             keep = near.unsqueeze(-1) | edge.new_tensor([0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1]).bool()
             edge = edge * keep
-        if self.app:
-            node = torch.cat([node, self.appearance(feat, box[..., 4], valid, near, dt, eye)], -1)
         x, e = self.node(node), self.edge(edge)
         for layer in self.layers:
             x = layer(x, e, allow)
-        return lg + self.out(x).squeeze(-1)
+        out = lg + self.out(x).squeeze(-1)
+        if self.app:
+            out = out + self.app_head(torch.cat([lg[..., None] / 5, self.appearance(feat, box[..., 4], valid, near, dt, eye)], -1)).squeeze(-1)
+        return out
