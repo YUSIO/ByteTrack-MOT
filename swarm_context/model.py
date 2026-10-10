@@ -65,7 +65,8 @@ class Layer(nn.Module):
         att = att.masked_fill(~allow[:, None], float("-inf")).softmax(-1)
         att = self.drop(att)
         msg = (att @ v).transpose(1, 2).reshape(b, n, d)
-        msg = msg + torch.einsum("bqk,bqkd->bqd", att.mean(1), self.ev(e))  # what the attended boxes look like relative to this one
+        # what the attended boxes look like relative to this one; the edges are averaged before the projection to keep memory low
+        msg = msg + self.ev(torch.einsum("bqk,bqke->bqe", att.mean(1), e))
         x = x + self.drop(self.o(msg))
         return x + self.drop(self.ff(self.n2(x)))
 
