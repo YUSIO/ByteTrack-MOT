@@ -46,7 +46,7 @@ def evaluate(model, loader, device):
     new, old, lab = [], [], []
     for b in loader:
         b = {k: v.to(device) for k, v in b.items()}
-        out = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"]))
+        out = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"], b.get("feat")))
         sel = b["valid"] & (b["step"] == 0)
         new.append(out[sel].float().cpu().numpy())
         old.append(b["box"][..., 4][sel].cpu().numpy())
@@ -84,6 +84,9 @@ def main():
     ap.add_argument("--band-weight", type=float, default=3.0)
     ap.add_argument("--max-per-frame", type=int, default=48)
     ap.add_argument("--min-score", type=float, default=0.01)
+    ap.add_argument("--app-mode", default="none", choices=["none", "peer", "hist", "peer+hist", "other"], help="how the detector's box features are used (needs feat in the spec)")
+    ap.add_argument("--r0", type=float, default=2.0)
+    ap.add_argument("--r1", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
@@ -93,13 +96,25 @@ def main():
     spec = json.loads(a.spec.read_text())
     seqs = {"train": [], "val": []}
     for s in spec:
-        seqs[s["role"]].append(Sequence(s["name"], s["det"], s["seq_dir"], a.min_score, a.max_per_frame, tuple(s["frames"]) if s.get("frames") else None))
+        seqs[s["role"]].append(Sequence(s["name"], s["det"], s["seq_dir"], a.min_score, a.max_per_frame, tuple(s["frames"]) if s.get("frames") else None,
+                                        feat_file=s["feat"] if a.app_mode != "none" else None))
     train_set = Windows(seqs["train"], a.k, True, a.seed)
     per_seq = np.bincount([i for i, _ in train_set.index])
     sampler = torch.utils.data.WeightedRandomSampler([1.0 / per_seq[i] for i, _ in train_set.index], num_samples=a.epoch_size, replacement=True)
     tr = torch.utils.data.DataLoader(train_set, batch_size=a.batch, sampler=sampler, collate_fn=collate, num_workers=4, drop_last=True)
-    va = torch.utils.data.DataLoader(Windows(seqs["val"], a.k, False), batch_size=a.batch, shuffle=False, collate_fn=collate, num_workers=4)
-    model = SwarmContext(k=a.k, d=a.d, heads=a.heads, layers=a.layers, drop=a.drop, scope=a.scope, node_abs=bool(a.node_abs), peer_dir=bool(a.peer_dir), key_drop=a.key_drop).to(a.device)
+    # the "other" control borrows the confident boxes of the next sample of the batch, so its validation batches are shuffled too
+    va = torch.utils.data.DataLoader(Windows(seqs["val"], a.k, False), batch_size=a.batch, shuffle=a.app_mode == "other", collate_fn=collate, num_workers=4,
+                                     generator=torch.Generator().manual_seed(0))
+    app = 0
+    if a.app_mode != "none":
+        allf = np.concatenate([v for q in seqs["train"] for v in q.feat.values() if len(v)])
+        app = allf.shape[1]
+    model = SwarmContext(k=a.k, d=a.d, heads=a.heads, layers=a.layers, drop=a.drop, scope=a.scope, r0=a.r0, r1=a.r1, node_abs=bool(a.node_abs), peer_dir=bool(a.peer_dir), key_drop=a.key_drop,
+                         app=app, app_mode=a.app_mode if app else "peer+hist")
+    if app:
+        model.app_mu.copy_(torch.from_numpy(allf.mean(0)))
+        model.app_sd.copy_(torch.from_numpy(allf.std(0) + 1e-6))
+    model = model.to(a.device)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.wd)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=a.epochs * len(tr), pct_start=0.1)
     (a.out / "args.json").write_text(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()}, indent=1) + "\n")
@@ -112,7 +127,7 @@ def main():
         t0, tot, n = time.time(), 0.0, 0
         for b in tr:
             b = {k: v.to(a.device) for k, v in b.items()}
-            out = model(b["box"], b["step"], b["wh"], b["valid"])
+            out = model(b["box"], b["step"], b["wh"], b["valid"], b.get("feat"))
             m = b["valid"] & (b["lab"] >= 0)
             w = torch.where(b["box"][..., 4] < 0.7, a.band_weight, 1.0)[m]
             loss = (torch.nn.functional.binary_cross_entropy_with_logits(out[m], b["lab"][m].float(), reduction="none") * w).sum() / w.sum()

@@ -37,14 +37,15 @@ def main():
     for s in json.loads(a.spec.read_text()):
         if a.roles and s.get("role") not in a.roles:
             continue
-        seq = Sequence(s["name"], s["det"], s["seq_dir"], state["min_score"], state["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None, labelled=False)
+        seq = Sequence(s["name"], s["det"], s["seq_dir"], state["min_score"], state["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None, labelled=False,
+                       feat_file=s["feat"] if state["cfg"].get("app") else None)
         rows = []
         frames = list(range(seq.first, seq.last + 1))
         for i in range(0, len(frames), a.batch):
             chunk = frames[i:i + a.batch]
             b = collate([seq.window(f, k) for f in chunk])
             b = {key: v.to(a.device) for key, v in b.items()}
-            p = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"]))
+            p = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"], b.get("feat")))
             for j, f in enumerate(chunk):
                 sel = (b["valid"][j] & (b["step"][j] == 0)).cpu().numpy()
                 box, new = b["box"][j].cpu().numpy()[sel], p[j].float().cpu().numpy()[sel]

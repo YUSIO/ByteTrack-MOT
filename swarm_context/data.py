@@ -40,7 +40,7 @@ def label_frame(det, gt):
 
 
 class Sequence:
-    def __init__(self, name, det_file, seq_dir, min_score=0.01, max_per_frame=64, frames=None, labelled=True):
+    def __init__(self, name, det_file, seq_dir, min_score=0.01, max_per_frame=64, frames=None, labelled=True, feat_file=None):
         ini = configparser.ConfigParser()
         ini.read(Path(seq_dir) / "seqinfo.ini")
         s = ini["Sequence"]
@@ -50,13 +50,25 @@ class Sequence:
         lo, hi = frames if frames else (1, self.length)
         self.first, self.last = lo, hi
         self.det, self.lab, self.gid, self.row = {}, {}, {}, {}
+        # optional appearance: the detector's feature at each box (extract_box_features.py), looked up by det.txt row
+        self.feat = None
+        if feat_file:
+            z = np.load(feat_file)
+            frow, fval = z["row"], z["p3"]
+            self.feat = {}
         for f in range(lo, hi + 1):
             idx = np.flatnonzero((raw[:, 0] == f) & (raw[:, 6] >= min_score))
-            idx = idx[np.argsort(-raw[idx, 6])][:max_per_frame]
+            idx = idx[np.argsort(-raw[idx, 6], kind="stable")][:max_per_frame]
             d = raw[idx][:, 2:7].astype(np.float32)
             g = gt[gt[:, 0] == f]
             lab, who = label_frame(d, g[:, 2:6]) if labelled else (np.full(len(d), -1), -np.ones(len(d), np.int64))
             self.det[f], self.lab[f], self.row[f] = d, lab, idx
+            if self.feat is not None:
+                self.feat[f] = np.zeros((len(idx), fval.shape[1]), np.float32)
+                if len(idx) and len(frow):
+                    pos = np.clip(np.searchsorted(frow, idx), 0, len(frow) - 1)
+                    hit = frow[pos] == idx
+                    self.feat[f][hit] = fval[pos[hit]]
             self.gid[f] = np.where(who >= 0, g[np.clip(who, 0, None), 1].astype(np.int64) if len(g) else -1, -1)
         self.raw = raw
 
@@ -70,7 +82,10 @@ class Sequence:
         box = np.concatenate([self.det[f] for f in fs]) if fs else np.zeros((0, 5), np.float32)
         step = np.concatenate([np.full(len(self.det[f]), -abs(f - t) // stride) for f in fs]) if fs else np.zeros(0)
         lab = np.concatenate([self.lab[f] for f in fs]) if fs else np.zeros(0)
-        return {"box": box, "step": step.astype(np.int64), "lab": lab.astype(np.int64), "wh": np.array([self.width, self.height], np.float32)}
+        w = {"box": box, "step": step.astype(np.int64), "lab": lab.astype(np.int64), "wh": np.array([self.width, self.height], np.float32)}
+        if self.feat is not None:
+            w["feat"] = np.concatenate([self.feat[f] for f in fs]) if fs else np.zeros((0, 1), np.float32)
+        return w
 
 
 def augment(w, rng, flip=0.5, drop=0.1, score_noise=0.15):
@@ -81,7 +96,10 @@ def augment(w, rng, flip=0.5, drop=0.1, score_noise=0.15):
         logit = np.log(np.clip(box[:, 4], 1e-4, 1 - 1e-4) / (1 - np.clip(box[:, 4], 1e-4, 1 - 1e-4))) + rng.normal(0, score_noise, len(box))
         box[:, 4] = 1 / (1 + np.exp(-logit))
         keep = rng.random(len(box)) >= drop
-        return {"box": box[keep], "step": w["step"][keep], "lab": w["lab"][keep], "wh": w["wh"]}
+        out = {"box": box[keep], "step": w["step"][keep], "lab": w["lab"][keep], "wh": w["wh"]}
+        if "feat" in w:
+            out["feat"] = w["feat"][keep]
+        return out
     return dict(w, box=box)
 
 
@@ -94,7 +112,15 @@ def collate(windows):
         m = len(w["box"])
         box[i, :m], step[i, :m], lab[i, :m], valid[i, :m] = torch.from_numpy(w["box"]), torch.from_numpy(w["step"]), torch.from_numpy(w["lab"]), True
         wh[i] = torch.from_numpy(w["wh"])
-    return {"box": box, "step": step, "lab": lab, "valid": valid, "wh": wh}
+    out = {"box": box, "step": step, "lab": lab, "valid": valid, "wh": wh}
+    if "feat" in windows[0]:
+        dim = max(w["feat"].shape[1] for w in windows)
+        feat = torch.zeros(b, n, dim)
+        for i, w in enumerate(windows):
+            if len(w["box"]):
+                feat[i, :len(w["box"])] = torch.from_numpy(w["feat"])
+        out["feat"] = feat
+    return out
 
 
 class Windows(torch.utils.data.Dataset):

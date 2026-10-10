@@ -31,7 +31,7 @@ def scores(ckpt, seqs, device, scope=None, batch=64):
         for i in range(0, len(frames), batch):
             b = collate([seq.window(f, state["cfg"]["k"]) for f in frames[i:i + batch]])
             b = {k: v.to(device) for k, v in b.items()}
-            p = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"]))
+            p = torch.sigmoid(model(b["box"], b["step"], b["wh"], b["valid"], b.get("feat")))
             res.append(p[b["valid"] & (b["step"] == 0)].float().cpu().numpy())
         out.append(np.concatenate(res))
     return out, state
@@ -51,7 +51,7 @@ def main():
     over = dict(o.split("=", 1) for o in a.override)
     spec = [s for s in json.loads(a.spec.read_text()) if s.get("role") in a.roles]
     first = torch.load(next(iter(models.values())), map_location="cpu", weights_only=False)
-    seqs = [Sequence(s["name"], s["det"], s["seq_dir"], first["min_score"], first["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None) for s in spec]
+    seqs = [Sequence(s["name"], s["det"], s["seq_dir"], first["min_score"], first["max_per_frame"], tuple(s["frames"]) if s.get("frames") else None, feat_file=s.get("feat") if first["cfg"].get("app") else None) for s in spec]
     old = [np.concatenate([q.det[f][:, 4] for f in range(q.first, q.last + 1)]) for q in seqs]
     lab = [np.concatenate([q.lab[f] for f in range(q.first, q.last + 1)]) for q in seqs]
     S = {"detector": old}
