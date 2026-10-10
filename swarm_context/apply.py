@@ -22,12 +22,16 @@ def main():
     ap.add_argument("--roles", nargs="*", default=None)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--scope", default=None, help="restrict the attention at inference (ablation)")
+    ap.add_argument("--keep-above", type=float, default=None, help="boxes the detector scored at or above this keep their score")
     ap.add_argument("--device", default="cuda")
     a = ap.parse_args()
     state = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     model = SwarmContext(**state["cfg"]).to(a.device)
     model.load_state_dict(state["model"])
     model.eval()
+    if a.scope:
+        model.scope = a.scope
     k = state["cfg"]["k"]
     summary = {}
     for s in json.loads(a.spec.read_text()):
@@ -44,6 +48,8 @@ def main():
             for j, f in enumerate(chunk):
                 sel = (b["valid"][j] & (b["step"][j] == 0)).cpu().numpy()
                 box, new = b["box"][j].cpu().numpy()[sel], p[j].float().cpu().numpy()[sel]
+                if a.keep_above is not None:
+                    new = np.where(box[:, 4] >= a.keep_above, box[:, 4], new)
                 rows += ["{},-1,{:.4f},{:.4f},{:.4f},{:.4f},{:.6f},-1,-1,-1\n".format(f, *bx[:4], sc) for bx, sc in zip(box, new)]
         (a.out / s["name"]).mkdir(parents=True, exist_ok=True)
         (a.out / s["name"] / "det.txt").write_text("".join(rows))
