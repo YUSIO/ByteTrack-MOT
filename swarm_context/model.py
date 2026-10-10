@@ -21,6 +21,7 @@ scope selects which other tokens a token may see:
   tube   only boxes close to it (distance <= r0 + r1 * frames apart, in its own box sides): its own history and duplicates
   peers  only boxes outside that neighbourhood, plus itself
   self   nothing but itself (no context: a per-box recalibration of the score)
+  none   the attention layers are not used at all; the output is the detector's logit plus the appearance head
 """
 import torch
 import torch.nn as nn
@@ -152,10 +153,12 @@ class SwarmContext(nn.Module):
         if not self.peer_dir:  # outside the neighbourhood only the distance is kept, not the direction
             keep = near.unsqueeze(-1) | edge.new_tensor([0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1]).bool()
             edge = edge * keep
-        x, e = self.node(node), self.edge(edge)
-        for layer in self.layers:
-            x = layer(x, e, allow)
-        out = lg + self.out(x).squeeze(-1)
+        out = lg
+        if self.scope != "none":
+            x, e = self.node(node), self.edge(edge)
+            for layer in self.layers:
+                x = layer(x, e, allow)
+            out = lg + self.out(x).squeeze(-1)
         if self.app:
             out = out + self.app_head(torch.cat([lg[..., None] / 5, self.appearance(feat, box[..., 4], valid, near, dt, eye)], -1)).squeeze(-1)
         return out

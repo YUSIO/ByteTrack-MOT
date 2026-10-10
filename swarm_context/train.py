@@ -67,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--scope", default="all", choices=["all", "tube", "peers", "self"])
+    ap.add_argument("--scope", default="all", choices=["all", "tube", "peers", "self", "none"])
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--d", type=int, default=64)
     ap.add_argument("--layers", type=int, default=3)
@@ -116,7 +116,7 @@ def main():
         model.app_mu.copy_(torch.from_numpy(allf.mean(0)))
         model.app_sd.copy_(torch.from_numpy(allf.std(0) + 1e-6))
     model = model.to(a.device)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.wd)
+    opt = torch.optim.AdamW([p for n, p in model.named_parameters() if a.scope != "none" or n.startswith(("embed", "app_head"))], lr=a.lr, weight_decay=a.wd)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=a.epochs * len(tr), pct_start=0.1)
     (a.out / "args.json").write_text(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()}, indent=1) + "\n")
     log, best, best_tp = open(a.out / "log.jsonl", "w"), -1.0, -1
@@ -134,7 +134,7 @@ def main():
             loss = (torch.nn.functional.binary_cross_entropy_with_logits(out[m], b["lab"][m].float(), reduction="none") * w).sum() / w.sum()
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.grad is not None], 1.0)
             opt.step()
             sched.step()
             tot, n = tot + float(loss), n + 1
