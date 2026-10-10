@@ -22,3 +22,6 @@ class Exp(_base.Exp):
         self.train_ann = "fold_{}_train.json".format(fold)
         self.val_ann = "fold_{}_val.json".format(fold)
         self.eval_interval = 10
+        # fold a diverged at the Exp043 learning rate right after warm-up (confidence loss blew up at lr 0.004);
+        # UAVSWARM_LR_SCALE lowers the peak learning rate for such a fold
+        self.basic_lr_per_img *= float(os.environ.get("UAVSWARM_LR_SCALE", "1"))
