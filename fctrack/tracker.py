@@ -91,26 +91,27 @@ class FCTrack:
             if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
                 continue
             size = m["box"][2:]
-            if r["estimator"] == "kalman":
-                c, used = t.tlwh[:2] + t.tlwh[2:] / 2, "kalman"
-            elif r["estimator"] == "hold":
-                c, used = m["box"][:2] + size / 2, "hold"
-            else:
-                ref = self.snap.get(t.frame_id, {})
-                if t.track_id not in ref:
+            for est in r["estimator"].split("+"):  # "formation+kalman": both positions are tried, the better verified one is kept
+                if est == "kalman":
+                    c, used = t.tlwh[:2] + t.tlwh[2:] / 2, "kalman"
+                elif est == "hold":
+                    c, used = m["box"][:2] + size / 2, "hold"
+                else:
+                    ref = self.snap.get(t.frame_id, {})
+                    if t.track_id not in ref:
+                        continue
+                    ids = list(ref)
+                    P0 = np.array([ref[i] for i in ids])
+                    avail = np.array([i in cur for i in ids])
+                    nb = select_neighbours(P0, ids.index(t.track_id), avail, r["graph"], r["max_neighbours"])
+                    if len(nb) < r["min_neighbours"]:
+                        self.stats["no_neighbour"] += 1
+                        continue
+                    N1 = np.array([cur[ids[j]][:2] + cur[ids[j]][2:] / 2 for j in nb])
+                    c, spread, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], r["consistency_sides"] * float(np.sqrt(size[0] * size[1])))
+                if not (0 <= c[0] < W and 0 <= c[1] < H):
                     continue
-                ids = list(ref)
-                P0 = np.array([ref[i] for i in ids])
-                avail = np.array([i in cur for i in ids])
-                nb = select_neighbours(P0, ids.index(t.track_id), avail, r["graph"], r["max_neighbours"])
-                if len(nb) < r["min_neighbours"]:
-                    self.stats["no_neighbour"] += 1
-                    continue
-                N1 = np.array([cur[ids[j]][:2] + cur[ids[j]][2:] / 2 for j in nb])
-                c, spread, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], r["consistency_sides"] * float(np.sqrt(size[0] * size[1])))
-            if not (0 <= c[0] < W and 0 <= c[1] < H):
-                continue
-            cands.append((t, np.r_[c - size / 2, size], used))
+                cands.append((t, np.r_[c - size / 2, size], used))
         if not cands:
             return []
         boxes = np.array([b for _, b, _ in cands])
@@ -125,17 +126,20 @@ class FCTrack:
             return []
         if self.verify is not None:
             p, final = self.verify(image(), boxes)
+            for _ in range(r.get("iterations", 1) - 1):  # look again at the regressed box
+                p, final = self.verify(image(), final)
             if not r["use_regressed_box"]:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
-        added, taken = [], cur_boxes
+        added, taken, done = [], cur_boxes, set()
         for i in np.argsort(-p):
-            if p[i] < r["p_min"] or final[i, 2] <= 1 or final[i, 3] <= 1:
+            if p[i] < r["p_min"] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
                 continue
             if len(taken) and iou_matrix(final[i], taken).max() >= r["iou_free"]:
                 continue
             t = cands[i][0]
+            done.add(t.track_id)
             t.re_activate(self.STrack(final[i], r["score"]), f, new_id=False)
             self.t.lost_stracks = [x for x in self.t.lost_stracks if x is not t]
             self.t.tracked_stracks.append(t)
