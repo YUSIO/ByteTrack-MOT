@@ -63,7 +63,7 @@ class FCTrack:
         rows, cur = [], {}
         for t in outs:
             box = np.asarray(t._det if t.frame_id == f else t.tlwh, float)
-            rows.append([t.track_id, box, float(t.score), t])
+            rows.append([t.track_id, box, t.score, t])  # the score keeps its dtype so that the written text matches the stored baseline
             if t.frame_id == f:
                 cur[t.track_id] = box
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
