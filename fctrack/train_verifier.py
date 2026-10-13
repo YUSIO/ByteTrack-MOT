@@ -7,6 +7,7 @@ import json
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -71,6 +72,7 @@ def main():
     a = ap.parse_args()
     cfg = json.loads(a.config.read_text())
     tr, data = cfg["train"][a.kind], cfg["train_data"][a.data]
+    cv2.setNumThreads(1)  # the loader workers must not each start an OpenCV thread pool
     torch.manual_seed(tr["seed"])
     np.random.seed(tr["seed"])
     root = Path(data["root"])
@@ -78,8 +80,9 @@ def main():
     held = set(data["held_out"])
     fit, val = [d for d in seqs if d.name not in held], [d for d in seqs if d.name in held]
     a.output.mkdir(parents=True, exist_ok=False)
-    train_set = FrameSamples(fit, a.kind, tr["per_frame"], True, step=tr["frame_step"])
-    val_set = FrameSamples(val, a.kind, tr["per_frame"], False, step=tr["val_frame_step"], seed=tr["seed"]) if val else None
+    pre = tr.get("preload", False)
+    train_set = FrameSamples(fit, a.kind, tr["per_frame"], True, step=tr["frame_step"], preload=pre)
+    val_set = FrameSamples(val, a.kind, tr["per_frame"], False, step=tr["val_frame_step"], seed=tr["seed"], preload=pre) if val else None
     info = {"kind": a.kind, "data": a.data, "fit_sequences": [d.name for d in fit], "held_out_sequences": [d.name for d in val],
             "fit_frames": len(train_set), "held_out_frames": len(val_set) if val_set else 0, "device": a.device, "torch": torch.__version__}
     print(json.dumps(info), flush=True)

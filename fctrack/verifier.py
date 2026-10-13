@@ -97,9 +97,9 @@ def verify(kind, model, img, tlwh, device):
 class FrameSamples(Dataset):
     """One item = one annotated frame; returns `per_frame` training samples drawn from it."""
 
-    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0):
+    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0, preload=False):
         self.kind, self.per_frame, self.train, self.seed = kind, per_frame, train, seed
-        self.frames = []
+        self.frames, self.images = [], None
         for d in sequences:
             d = Path(d)
             g = np.loadtxt(d / "gt/gt.txt", delimiter=",", ndmin=2)
@@ -108,13 +108,18 @@ class FrameSamples(Dataset):
             for f in np.unique(g[:, 0])[::step]:
                 self.frames.append((str(d / "img1" / f"{int(f):06d}.jpg"), g[g[:, 0] == f][:, 2:6].astype(np.float32), int(ini["Sequence"]["imWidth"])))
 
+        if preload:  # decode every frame once, before the loader forks its workers (they share the memory)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(8) as pool:
+                self.images = list(pool.map(lambda fr: cv2.imread(fr[0]), self.frames))
+
     def __len__(self):
         return len(self.frames)
 
     def __getitem__(self, i):
         path, gt, width = self.frames[i]
         rng = np.random.default_rng(None if self.train else self.seed * 100003 + i)
-        img = cv2.imread(path)
+        img = self.images[i] if self.images is not None else cv2.imread(path)
         H, W = img.shape[:2]
         gc, gs = gt[:, :2] + gt[:, 2:] / 2, np.sqrt(gt[:, 2] * gt[:, 3])
         return self.paper(img, gt, gc, gs, W, H, rng) if self.kind == "paper" else self.seeds(img, gt, gc, gs, W, H, rng)
