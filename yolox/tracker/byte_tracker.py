@@ -259,7 +259,10 @@ class BYTETracker(object):
                           (tlbr, s) in zip(dets_second, scores_second)]
         else:
             detections_second = []
-        r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
+        # Exp070 diagnostic (off by default): tracks lost for at most `low_score_lost` frames also take low score boxes
+        k = getattr(self.args, "low_score_lost", 0)
+        r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked
+                             or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:

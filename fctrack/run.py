@@ -49,7 +49,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit):
         info = seq_info(data / name)
         shape = (info["imHeight"], info["imWidth"])
         raw = np.loadtxt(root / cell["detections"] / name / "det.txt", delimiter=",", ndmin=2)
-        tracker = BYTETracker(SimpleNamespace(**cfg["tracker"]), frame_rate=info["frameRate"])
+        tracker = BYTETracker(SimpleNamespace(**{**cfg["tracker"], **arm.get("tracker", {})}), frame_rate=info["frameRate"])  # per-arm overrides (diagnostics)
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify)
         rows = []

@@ -144,7 +144,8 @@ class FCTrack:
             self.snap[f][t.track_id] = final[i, :2] + final[i, 2:] / 2
             self.meta[t.track_id]["box"] = final[i].copy() if r["use_regressed_box"] else self.meta[t.track_id]["box"]
             taken = np.vstack((taken, final[i]))
-            added.append([t.track_id, final[i].copy(), float(r["score"]), t])
+            if r.get("write", True):  # write = False: the fill-in only keeps the track alive inside the tracker (diagnostic)
+                added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
         return added
