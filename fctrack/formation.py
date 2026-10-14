@@ -6,12 +6,17 @@ missing member was observed in) and in the current frame. Two choices are separa
   graph   which members are used        mst       neighbours on the Euclidean minimum spanning tree (the paper)
                                         knn       nearest members
                                         delaunay  natural neighbours (Delaunay triangulation)
-  model   how they move the member      offset      each neighbour keeps its offset to the member (the paper)
+  model   how they move the member      offset      each neighbour keeps its offset to the member; neighbour estimates
+                                                    within eps pixels of each other are averaged, otherwise weighted
+                                        offset_paper  the same offsets with the consistency rule as written in the paper:
+                                                    two estimates agree when their squared distance is at most a fraction
+                                                    (10 %) of the box area; the agreeing estimates are used when at least
+                                                    two agree, otherwise all are weighted by distance
                                         similarity  one rotation + scale + translation fitted to the neighbours
                                         affine      one affine map fitted to the neighbours; with three neighbours
                                                     this is the barycentric coordinate of the member in their triangle
 
-The paper does not give the consistency threshold of the neighbour estimates; it is a parameter here.
+The consistency rule of `offset` is not the paper's (it was written before the paper was re-read); `offset_paper` is.
 """
 from collections import deque
 
@@ -88,12 +93,22 @@ def estimate(p0, N0, N1, model, eps):
     """Centre of the missing member in the current frame.
 
     p0: its centre in the reference frame; N0, N1: k x 2 centres of the chosen neighbours in the reference and the
-    current frame; eps: neighbour estimates within `eps` pixels of each other count as consistent (offset model).
+    current frame; eps: neighbour estimates within `eps` pixels of each other count as consistent (offset model), or
+    the largest squared distance in pixels^2 of two agreeing estimates (offset_paper).
     Returns (centre, spread, model actually used); spread is the largest distance between two neighbour estimates.
     """
     each = N1 + (p0 - N0)  # what every neighbour says on its own
     spread = float(max(np.linalg.norm(each[:, None] - each[None], axis=2).max(), 0.0)) if len(each) > 1 else 0.0
     k = len(N0)
+    if model == "offset_paper" and k >= 2:
+        agree = ((each[:, None] - each[None]) ** 2).sum(2) <= eps
+        i = int(agree.sum(1).argmax())  # the estimate with the most agreeing others (the nearest neighbour's on ties)
+        if agree[i].sum() >= 2:
+            return each[agree[i]].mean(0), spread, "offset_agree"
+        w = 1.0 / np.maximum(np.linalg.norm(N0 - p0, axis=1), 1e-6)
+        return (each * w[:, None]).sum(0) / w.sum(), spread, "offset_weighted"
+    if model == "offset_paper":
+        model = "offset"
     if model == "affine" and k >= 3:
         X = np.c_[N0, np.ones(k)]
         if np.linalg.cond(X) < 1e4:  # not collinear
@@ -109,6 +124,35 @@ def estimate(p0, N0, N1, model, eps):
         return each.mean(0), spread, "offset"
     w = 1.0 / np.maximum(np.linalg.norm(N0 - p0, axis=1), 1e-6)  # inconsistent: nearer neighbours count more
     return (each * w[:, None]).sum(0) / w.sum(), spread, "offset_weighted"
+
+
+class PaperOutlierFilter:
+    """Stage 1 of FCTrack as in Algorithm 1 of the paper.
+
+    The centres of the last `history` frames (including the current one) are pooled; the member distances are measured
+    to their mean with the covariance + eps I; the threshold is the `percentile` of the distances of the last `history`
+    frames including the current one. Nothing is flagged in the first frame.
+    """
+
+    def __init__(self, history=30, percentile=95.0, eps=1.0):
+        self.pc, self.dh = deque(maxlen=history), deque(maxlen=history)
+        self.percentile, self.eps, self.first = percentile, eps, True
+
+    def update(self, centres):
+        centres = np.asarray(centres, float).reshape(-1, 2)
+        self.pc.append(centres)
+        if self.first:
+            self.first = False
+            return np.zeros(len(centres), bool)
+        flat = np.concatenate(self.pc)
+        if len(flat) > 1:
+            mu, inv = flat.mean(0), np.linalg.inv(np.cov(flat.T) + self.eps * np.eye(2))
+        else:
+            mu, inv = np.zeros(2), np.eye(2)
+        d = np.sqrt(np.einsum("ij,jk,ik->i", centres - mu, inv, centres - mu))
+        self.dh.append(d)
+        hist = np.concatenate(self.dh)
+        return d > np.percentile(hist, self.percentile) if len(hist) else np.zeros(len(centres), bool)
 
 
 class OutlierFilter:

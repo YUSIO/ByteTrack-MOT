@@ -3,14 +3,15 @@
 Every frame: (1) ByteTrack update with the detector's boxes; (2) for every track that has just gone missing, estimate
 where the member is now, verify the estimate on the image and, if accepted, keep the box: the track is re-activated
 with it and the box is written out; (3) optionally hold back formation outliers until the verifier has accepted them
-on consecutive frames. Step (2) is where the graph (mst / knn / delaunay) and the motion model are switched; the
+on consecutive frames. With `outlier.order = "paper"` step (3) runs before step (2) on the associated tracks only, as in
+the paper, and the members held back are not used as neighbours. Step (2) is where the graph (mst / knn / delaunay) and the motion model are switched; the
 estimators `kalman` (the track's own prediction) and `hold` (its last box) are the controls without neighbours.
 """
 from collections import Counter
 
 import numpy as np
 
-from fctrack.formation import OutlierFilter, estimate, select_neighbours
+from fctrack.formation import OutlierFilter, PaperOutlierFilter, estimate, select_neighbours
 
 
 def wrap_stracks(STrack):
@@ -52,7 +53,13 @@ class FCTrack:
         self.frame = 0
         self.snap = {}     # frame -> {track id: centre} of the members observed (or recovered) in that frame
         self.meta = {}     # track id -> last real frame, number of real observations, last box, outlier state
-        self.filter = OutlierFilter(self.out["history"], self.out["percentile"], self.out["regulariser"]) if self.out else None
+        if not self.out:
+            self.filter = None
+        elif self.out.get("form") == "paper":
+            self.filter = PaperOutlierFilter(self.out["history"], self.out["percentile"], self.out.get("eps", 1.0))
+        else:
+            self.filter = OutlierFilter(self.out["history"], self.out["percentile"], self.out["regulariser"])
+        self.first_filter = bool(self.out) and self.out.get("order") == "paper"
         self.stats = Counter()
 
     def step(self, det, shape, image):
@@ -68,6 +75,10 @@ class FCTrack:
                 cur[t.track_id] = box
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
                 m.update(real=f, obs=m["obs"] + 1, box=box)
+        if self.first_filter and rows:  # the paper's order: outliers are removed before missing members are estimated
+            rows = self.hold_back(f, rows, image)
+            kept = {r[0] for r in rows}
+            cur = {tid: b for tid, b in cur.items() if tid in kept}
         self.snap[f] = {tid: b[:2] + b[2:] / 2 for tid, b in cur.items()}
         if self.rec:
             rows += self.recover(f, det, cur, W, H, image)
@@ -75,7 +86,7 @@ class FCTrack:
                 del self.snap[old]
         else:
             self.snap = {f: self.snap[f]}
-        if self.filter is not None and rows:
+        if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         return [(tid, box, score) for tid, box, score, _ in rows]
 
@@ -156,7 +167,11 @@ class FCTrack:
             self.stats["no_neighbour"] += 1
             return None
         N1 = np.array([cur[ids[j]][:2] + cur[ids[j]][2:] / 2 for j in nb])
-        c, _, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], r["consistency_sides"] * float(np.sqrt(size[0] * size[1])))
+        if r["model"] == "offset_paper":  # squared pixels: a fraction of the box area (10 % in the paper)
+            eps = r.get("consistency_area_fraction", 0.1) * float(size[0] * size[1])
+        else:
+            eps = r["consistency_sides"] * float(np.sqrt(size[0] * size[1]))
+        c, _, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], eps)
         return c, used
 
     def hold_back(self, f, rows, image):

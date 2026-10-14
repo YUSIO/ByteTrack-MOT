@@ -2,6 +2,10 @@
 
 paper   ResNet18 on a 224 x 128 native-resolution crop around the estimated position: UAV or background (V-USDT).
         The estimated box is kept unchanged when the crop is accepted.
+paper_resized
+        The same ResNet18, but the 224 x 128 input is a crop of PR_ZOOM box sides in height (and 224 / 128 times that in
+        width) around the estimated position, resized; the other reading of "cropped 224x128 images around the
+        estimated position" in the paper. Not in the paper as such.
 seed    A small network on a crop that covers ZOOM x the box side at a fixed 64 x 64 size. It answers whether a UAV
         centre lies within R_POS box sides of the estimated centre, and regresses that UAV's box. Not in the paper.
 
@@ -18,6 +22,7 @@ from torch.utils.data import Dataset
 
 PAPER_W, PAPER_H = 224, 128
 IN, ZOOM, R_POS, R_NEG = 64, 3.0, 1.0, 1.5
+PR_ZOOM = 3.0
 MEAN, STD = np.array([0.485, 0.456, 0.406], np.float32), np.array([0.229, 0.224, 0.225], np.float32)
 
 
@@ -25,6 +30,14 @@ def paper_crop(img, cx, cy):
     """224 x 128 native pixels centred at (cx, cy), RGB, normalised, CHW."""
     M = np.array([[1, 0, PAPER_W / 2 - cx], [0, 1, PAPER_H / 2 - cy]], np.float32)
     c = cv2.warpAffine(img, M, (PAPER_W, PAPER_H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return ((c[:, :, ::-1].astype(np.float32) / 255.0 - MEAN) / STD).transpose(2, 0, 1)
+
+
+def paper_resized_crop(img, cx, cy, side):
+    """A crop of PR_ZOOM x side (height) by PR_ZOOM x side x 224 / 128 (width) around (cx, cy), resized to 224 x 128."""
+    s = PAPER_H / (PR_ZOOM * side)
+    M = np.array([[s, 0, PAPER_W / 2 - s * cx], [0, s, PAPER_H / 2 - s * cy]], np.float32)
+    c = cv2.warpAffine(img, M, (PAPER_W, PAPER_H), flags=cv2.INTER_LINEAR if s >= 1 else cv2.INTER_AREA, borderMode=cv2.BORDER_REPLICATE)
     return ((c[:, :, ::-1].astype(np.float32) / 255.0 - MEAN) / STD).transpose(2, 0, 1)
 
 
@@ -73,7 +86,7 @@ def scalars(side, width):
 
 
 def load(kind, path, device):
-    model = (PaperVerifier(pretrained=False) if kind == "paper" else SeedVerifier()).to(device)
+    model = (PaperVerifier(pretrained=False) if kind.startswith("paper") else SeedVerifier()).to(device)
     model.load_state_dict(torch.load(path, map_location=device))
     return model.eval()
 
@@ -87,6 +100,9 @@ def verify(kind, model, img, tlwh, device):
         x = torch.from_numpy(np.stack([paper_crop(img, a, b) for a, b in zip(cx, cy)])).to(device)
         return torch.sigmoid(model(x)).cpu().numpy().astype(float), tlwh.copy()
     side = np.sqrt(tlwh[:, 2] * tlwh[:, 3])
+    if kind == "paper_resized":
+        x = torch.from_numpy(np.stack([paper_resized_crop(img, a, b, s) for a, b, s in zip(cx, cy, side)])).to(device)
+        return torch.sigmoid(model(x)).cpu().numpy().astype(float), tlwh.copy()
     x = torch.from_numpy(np.stack([seed_crop(img, a, b, s) for a, b, s in zip(cx, cy, side)])).to(device)
     out = model(x, torch.from_numpy(scalars(side, np.full(len(side), img.shape[1], float))).to(device)).cpu().numpy().astype(float)
     w, h = tlwh[:, 2] * np.exp(out[:, 3]), tlwh[:, 3] * np.exp(out[:, 4])
@@ -122,7 +138,11 @@ class FrameSamples(Dataset):
         img = self.images[i] if self.images is not None else cv2.imread(path)
         H, W = img.shape[:2]
         gc, gs = gt[:, :2] + gt[:, 2:] / 2, np.sqrt(gt[:, 2] * gt[:, 3])
-        return self.paper(img, gt, gc, gs, W, H, rng) if self.kind == "paper" else self.seeds(img, gt, gc, gs, W, H, rng)
+        if self.kind == "paper":
+            return self.paper(img, gt, gc, gs, W, H, rng)
+        if self.kind == "paper_resized":
+            return self.paper_resized(img, gt, gc, gs, W, H, rng)
+        return self.seeds(img, gt, gc, gs, W, H, rng)
 
     def paper(self, img, gt, gc, gs, W, H, rng):
         """Equal numbers of UAV crops (centred on an annotated UAV, small jitter) and background crops (no UAV inside)."""
@@ -140,6 +160,31 @@ class FrameSamples(Dataset):
             if not inside.any():
                 xs.append(paper_crop(img, *c))
                 ys.append(0.0)
+        return self.augment(xs, ys, rng)
+
+    def paper_resized(self, img, gt, gc, gs, W, H, rng):
+        """As `paper`, on scale-normalised crops: equal numbers of UAV crops and background crops (no UAV inside)."""
+        xs, ys = [], []
+        n = self.per_frame // 2
+        for j in rng.integers(len(gt), size=n):
+            jit = rng.normal(0, 0.15, 2) * gs[j] if self.train else np.zeros(2)
+            side = gs[j] * np.exp(rng.normal(0, 0.1)) if self.train else gs[j]
+            xs.append(paper_resized_crop(img, *(gc[j] + jit), side))
+            ys.append(1.0)
+        tries = 0
+        while len(xs) < 2 * n and tries < 50 * n:
+            tries += 1
+            c = np.array([rng.uniform(0, W), rng.uniform(0, H)])
+            side = gs[int(rng.integers(len(gt)))] * (np.exp(rng.normal(0, 0.1)) if self.train else 1.0)
+            hh = PR_ZOOM * side / 2
+            hw = hh * PAPER_W / PAPER_H
+            inside = (np.abs(gc[:, 0] - c[0]) < hw + gt[:, 2] / 2) & (np.abs(gc[:, 1] - c[1]) < hh + gt[:, 3] / 2)
+            if not inside.any():
+                xs.append(paper_resized_crop(img, *c, side))
+                ys.append(0.0)
+        return self.augment(xs, ys, rng)
+
+    def augment(self, xs, ys, rng):
         x = np.stack(xs)
         if self.train:
             flip = rng.random(len(x)) < 0.5

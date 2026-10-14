@@ -63,3 +63,44 @@ def test_outlier_filter_flags_a_member_that_leaves_the_formation():
     moved = base.copy()
     moved[4] = [60, 60]
     assert f.update(moved)[4]
+
+
+def test_paper_consistency_uses_the_agreeing_pair():
+    # the paper's example: a 40 x 30 box (threshold 120 px^2), estimates (50, 50), (55, 52), (80, 90)
+    p0 = np.array([0.0, 0.0])
+    N0 = np.array([[-10.0, 0.0], [0.0, -20.0], [30.0, 0.0]])
+    each = np.array([[50.0, 50.0], [55.0, 52.0], [80.0, 90.0]])
+    c, _, used = estimate(p0, N0, each - (p0 - N0), "offset_paper", eps=0.1 * 40 * 30)
+    assert used == "offset_agree" and np.allclose(c, [52.5, 51.0])
+    each = np.array([[50.0, 50.0], [70.0, 52.0], [80.0, 90.0]])  # nobody agrees: weighted by 1 / reference distance
+    c, _, used = estimate(p0, N0, each - (p0 - N0), "offset_paper", eps=0.1 * 40 * 30)
+    w = 1 / np.array([10.0, 20.0, 30.0])
+    assert used == "offset_weighted" and np.allclose(c, (each * w[:, None]).sum(0) / w.sum())
+    c, _, used = estimate(p0, N0[:1], each[:1] - (p0 - N0[:1]), "offset_paper", eps=120.0)
+    assert used == "offset" and np.allclose(c, each[0])
+
+
+def test_paper_outlier_filter_pools_the_history_and_skips_the_first_frame():
+    from fctrack.formation import PaperOutlierFilter
+    f = PaperOutlierFilter(history=30, percentile=95.0, eps=1.0)
+    rng = np.random.default_rng(1)
+    base = rng.normal(0, 5, (8, 2)) + 100
+    assert not f.update(base).any()
+    for _ in range(40):
+        flag = f.update(base + rng.normal(0, 0.5, base.shape))
+    away = base.copy()
+    away[3] += [200, 0]
+    flag = f.update(away)
+    assert flag[3] and flag.sum() == 1
+
+
+def test_paper_resized_crop_is_scale_normalised():
+    from fctrack.verifier import PAPER_H, PAPER_W, PR_ZOOM, paper_resized_crop
+    img = np.zeros((400, 600, 3), np.uint8)
+    img[195:205, 295:305] = 255  # a 10 px square at (300, 200)
+    x = paper_resized_crop(img, 299.5, 199.5, 10.0)  # OpenCV puts pixel centres at integer coordinates
+    assert x.shape == (3, PAPER_H, PAPER_W)
+    bright = x[0] > 0
+    ys, xs = np.nonzero(bright)
+    assert abs(ys.mean() - PAPER_H / 2) < 1.5 and abs(xs.mean() - PAPER_W / 2) < 1.5
+    assert abs(bright.sum(1).max() - PAPER_H / PR_ZOOM) < 3  # the square spans one third of the crop height

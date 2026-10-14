@@ -1,4 +1,5 @@
-"""Train a verification network (paper: ResNet18 on 224 x 128 crops; seed: scale-normalised crop with box regression).
+"""Train a verification network (paper: ResNet18 on 224 x 128 crops; paper_resized: the same on scale-normalised crops
+resized to 224 x 128; seed: scale-normalised crop with box regression).
 
 Reads annotated training frames only. Sequences named in `held_out` are used for validation, never for fitting.
 """
@@ -34,7 +35,7 @@ def validate(kind, model, loader, device):
     ps, ys, ious = [], [], []
     for batch in loader:
         batch = [b.to(device) for b in batch]
-        if kind == "paper":
+        if kind.startswith("paper"):
             x, y = batch
             p = torch.sigmoid(model(x))
         else:
@@ -65,7 +66,7 @@ def validate(kind, model, loader, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--kind", choices=("paper", "seed"), required=True)
+    ap.add_argument("--kind", choices=("paper", "paper_resized", "seed"), required=True)
     ap.add_argument("--data", required=True, help="key of the training set in the config")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--device", default="cuda:0")
@@ -88,7 +89,7 @@ def main():
     print(json.dumps(info), flush=True)
     loader = DataLoader(train_set, batch_size=tr["frames_per_batch"], shuffle=True, num_workers=tr["workers"], collate_fn=collate, drop_last=True, persistent_workers=True)
     vloader = DataLoader(val_set, batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"], collate_fn=collate) if val_set else None
-    model = (PaperVerifier(pretrained=tr.get("pretrained", True)) if a.kind == "paper" else SeedVerifier()).to(a.device)
+    model = (PaperVerifier(pretrained=tr.get("pretrained", True)) if a.kind.startswith("paper") else SeedVerifier()).to(a.device)
     opt = torch.optim.AdamW(model.parameters(), lr=tr["lr"], weight_decay=tr["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, tr["lr"], total_steps=tr["epochs"] * len(loader), pct_start=0.1)
     log, t0 = [], time.time()
@@ -97,7 +98,7 @@ def main():
         tot, steps = 0.0, 0
         for batch in loader:
             batch = [b.to(a.device, non_blocking=True) for b in batch]
-            if a.kind == "paper":
+            if a.kind.startswith("paper"):
                 x, y = batch
                 loss = F.binary_cross_entropy_with_logits(model(x), y)
             else:
