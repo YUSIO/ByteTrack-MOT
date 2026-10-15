@@ -123,7 +123,8 @@ def main():
                 print(json.dumps({"iter": it, "det_loss": acc["det"] / acc["n"], "head_loss": acc["head"] / acc["n"], "seconds": int(time.time() - t0),
                                   "max_mem_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2)}), flush=True)
         det.eval()
-        rec = {"epoch": ep + 1, "seconds": int(time.time() - t0), "det_loss": acc["det"] / max(1, acc["n"]), "head_loss": acc["head"] / max(1, acc["n"])}
+        rec = {"epoch": ep + 1, "seconds": int(time.time() - t0), "det_loss": acc["det"] / max(1, acc["n"]), "head_loss": acc["head"] / max(1, acc["n"]),
+               "max_mem_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2)}
         rec["held_out"] = validate(det, {"all": head}, vloader, device)["all"]
         log.append(rec)
         print(json.dumps(rec), flush=True)
