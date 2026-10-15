@@ -55,9 +55,10 @@ def centre(b):
 
 
 class TrackSamples(Dataset):
-    def __init__(self, seq_dirs, frames, train=True, seed=0, max_queries=24):
-        """seq_dirs: sequence directories; frames: {sequence name: sorted list of usable frames}."""
-        self.train, self.seed, self.max_queries = train, seed, max_queries
+    def __init__(self, seq_dirs, frames, train=True, seed=0, max_queries=24, labels=False):
+        """seq_dirs: sequence directories; frames: {sequence name: sorted list of usable frames}; labels: also return
+        the annotated boxes of the current frame (network-input cx, cy, w, h) for a detection loss."""
+        self.train, self.seed, self.max_queries, self.labels = train, seed, max_queries, labels
         self.seqs, self.items = [], []
         for d in seq_dirs:
             d = Path(d)
@@ -130,6 +131,11 @@ class TrackSamples(Dataset):
         lt, rt = letterbox(img_t)
         lu, _ = letterbox(img_u)
         assert abs(rt - ratio) < 1e-12
+        if self.labels:
+            boxes = np.array([np.r_[centre(g), g[2:]] for g in at_t.values()]).reshape(-1, 4)
+            if flip:
+                boxes[:, 0] = W - boxes[:, 0]
+            return lt, lu, queries, boxes * ratio
         return lt, lu, queries
 
     @staticmethod
@@ -214,4 +220,10 @@ def collate(batch):
     for i, b in enumerate(batch):
         qs += b[2]
         qimg += [i] * len(b[2])
+    if len(batch[0]) == 4:  # detection targets: B x max x (class, cx, cy, w, h), zero rows are padding
+        n = max(1, max(len(b[3]) for b in batch))
+        tg = torch.zeros(B, n, 5)
+        for i, b in enumerate(batch):
+            tg[i, : len(b[3]), 1:] = torch.from_numpy(b[3]).float()
+        return imgs, qs, torch.tensor(qimg), B, tg
     return imgs, qs, torch.tensor(qimg), B
