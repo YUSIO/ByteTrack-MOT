@@ -46,9 +46,12 @@ def iou_matrix(a, b):
 
 
 class FCTrack:
-    def __init__(self, tracker, STrack, cfg, verify=None):
-        """cfg: the arm's `recover` and `outlier` blocks (either may be None); verify(img, tlwh) -> (p, boxes)."""
+    def __init__(self, tracker, STrack, cfg, verify=None, log=False):
+        """cfg: the arm's `recover` and `outlier` blocks (either may be None); verify(img, tlwh) -> (p, boxes).
+
+        log: keep one record per verified fill-in attempt in `self.attempts` (read only; no decision changes)."""
         self.t, self.STrack, self.verify = tracker, STrack, verify
+        self.log, self.attempts = log, []
         self.rec, self.out = cfg.get("recover"), cfg.get("outlier")
         self.frame = 0
         self.snap = {}     # frame -> {track id: centre} of the members observed (or recovered) in that frame
@@ -130,12 +133,19 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
+        if self.log:  # state before any decision of this frame (re-activation below changes frame_id and covariance)
+            pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
+                    float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]
         added, taken, done = [], cur_boxes, set()
+        decision = ["below_p" if p[i] < r["p_min"] else "" for i in range(len(cands))]
         for i in np.argsort(-p):
             if p[i] < r["p_min"] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
+                decision[i] = decision[i] or ("done" if cands[i][0].track_id in done else "degenerate")
                 continue
             if len(taken) and iou_matrix(final[i], taken).max() >= r["iou_free"]:
+                decision[i] = "overlap"
                 continue
+            decision[i] = "written" if r.get("write", True) else "kept_unwritten"
             t = cands[i][0]
             done.add(t.track_id)
             t.re_activate(self.STrack(final[i], r["score"]), f, new_id=False)
@@ -148,6 +158,11 @@ class FCTrack:
                 added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
+        if self.log:
+            for i, (t, prop, used) in enumerate(cands):
+                gap, since_real, obs, cxx, cyy = pre[i]
+                self.attempts.append([f, t.track_id, gap, since_real, obs, used, *map(float, prop), *map(float, final[i]),
+                                      float(p[i]), decision[i], cxx, cyy])
         return added
 
     def position(self, t, m, est, cur, size):

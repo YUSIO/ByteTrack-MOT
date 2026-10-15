@@ -31,7 +31,11 @@ def seq_info(seq_dir):
     return {k: int(ini["Sequence"][k]) for k in ("seqLength", "imHeight", "imWidth", "frameRate")}
 
 
-def run_arm(root, cfg, cell, arm, tracks, device, limit):
+ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,prop_w,prop_h,"
+                   "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y")
+
+
+def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
     wrap_stracks(STrack)
     verify = None
     if arm.get("verifier"):
@@ -44,6 +48,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit):
     names = sorted(x.name for x in (root / cell["detections"]).glob("UAVSwarm-*") if x.is_dir())
     names = names[:limit] if limit else names
     tracks.mkdir(parents=True, exist_ok=False)
+    if attempts_dir is not None:
+        attempts_dir.mkdir(parents=True, exist_ok=False)
     stats, digests = {}, {}
     for name in names:
         info = seq_info(data / name)
@@ -51,7 +57,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit):
         raw = np.loadtxt(root / cell["detections"] / name / "det.txt", delimiter=",", ndmin=2)
         tracker = BYTETracker(SimpleNamespace(**{**cfg["tracker"], **arm.get("tracker", {})}), frame_rate=info["frameRate"])  # per-arm overrides (diagnostics)
         BaseTrack._count = 0
-        fc = FCTrack(tracker, STrack, arm, verify)
+        fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
         rows = []
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]
@@ -70,6 +76,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit):
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
+        if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
+            (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(
+                ",".join(repr(v) if isinstance(v, float) else str(v) for v in a) + "\n" for a in fc.attempts))
         for k, v in fc.stats.items():
             stats[k] = stats.get(k, 0) + v
     return names, stats, digests
@@ -90,6 +99,7 @@ def main():
     ap.add_argument("--arms", nargs="+")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--limit", type=int, default=0, help="smoke test only: the first k sequences")
+    ap.add_argument("--log-attempts", action="store_true", help="write one csv row per verified fill-in attempt to <output>/attempts/<arm>/")
     a = ap.parse_args()
     root = a.root.resolve()
     cfg = json.loads(a.config.read_text())
@@ -100,7 +110,8 @@ def main():
     res = {}
     for arm_name, arm in arms.items():
         tracks = out / "tracks" / arm_name
-        names, stats, digests = run_arm(root, cfg, cell, arm, tracks, a.device, a.limit)
+        names, stats, digests = run_arm(root, cfg, cell, arm, tracks, a.device, a.limit,
+                                        out / "attempts" / arm_name if a.log_attempts else None)
         e = evaluate(root / cell["dataset_root"], cell["split"], tracks, out / "metrics" / f"{arm_name}.json", names)
         m, h = e["overall"]["motmetrics"], e["overall"]["hota"]
         overall = {"MOTA": m["mota"], "IDF1": m["idf1"], "HOTA": h["HOTA"], "DetA": h["DetA"], "AssA": h["AssA"],
