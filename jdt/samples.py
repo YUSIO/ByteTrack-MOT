@@ -10,9 +10,13 @@ builds it at inference:
   motion        mean displacement over up to 3 annotated steps before r (jittered); prediction = centre + k * velocity
   formation     the other members annotated at r and t, each kept with probability 0.8 ("tracked now"), their centres
                 at t jittered; up to 6 Delaunay neighbours give the offset estimates (fctrack.formation)
-  placement     the formation estimate, or the motion prediction when no neighbour is left (the Exp070 fallback rule),
-                plus N(0, s * side) with s ~ U(0, 0.5); with probability 0.15 it is put on another member that is
-                tracked now (within 4 sides) instead, which makes "is it this track's UAV or a neighbour" a question
+  state error   the track's own centre at r is jittered by N(0, s side), s ~ U(0, 0.5); with probability 0.15 it sits
+                on another member within 4 sides (drifted to a neighbour), with probability 0.2 it is displaced by 2-5
+                sides; extra queries are tracks born on clutter (see TrackSamples.state / background)
+  placement     the formation estimate from that state, or the motion prediction when no neighbour is left (the
+                Exp070 fallback rule), exactly as at inference: the window never moves relative to the state, so the
+                structure cues cannot reveal the label through the placement; windows whose box overlaps a member
+                tracked now (IoU >= 0.3) are dropped, as the tracker never looks there
   label         the member's annotated box at t if its centre is inside the window, otherwise absent
 
 Only the frames listed in `frames` are used as t, r and u, so that the detector features come from frames the
@@ -27,6 +31,7 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from fctrack.formation import estimate, select_neighbours
+from fctrack.tracker import iou_matrix
 from jdt.detector import letterbox
 from jdt.query import make_query
 
@@ -87,30 +92,33 @@ class TrackSamples(Dataset):
         queries = []
         for a in order:
             j = ids_r[a]
-            b = at_r[j].copy()
             side = sides_r[a]
-            b[:2] += rng.normal(0, 0.05, 2) * side
+            true_c = P0[a]
+            state_c, kind = self.state(rng, true_c, P0, a, side)  # where the tracker believes the track was at r
+            shift = state_c - true_c
+            b = at_r[j].copy()
+            b[:2] += shift
             b[2:] *= np.exp(rng.normal(0, 0.05, 2))
-            c_r = centre(b)
             hist = [centre(gt[f][j]) for f in range(r - 3, r + 1) if j in gt.get(f, {})]
             vel = np.diff(np.array(hist), axis=0).mean(0) if len(hist) >= 2 else np.zeros(2)
             vel = vel + rng.normal(0, 0.05, 2) * side
-            cv = c_r + k * vel
+            cv = state_c + k * vel
+            Ps = P0.copy()
+            Ps[a] = state_c
             avail = np.array([ids_r[x] in now and ids_r[x] != j for x in range(len(ids_r))])
-            nb = select_neighbours(P0, int(a), avail, "delaunay", 6) if avail.any() else []
+            nb = select_neighbours(Ps, int(a), avail, "delaunay", 6) if avail.any() else []
             if nb:
-                N0 = P0[nb] - P0[a] + c_r
                 N1 = np.array([now[ids_r[x]] for x in nb])
-                est, spread, _ = estimate(c_r, N0, N1, "offset", 0.5 * side)
-                each = N1 + (c_r - N0)
-                place = est.copy()
+                place, spread, _ = estimate(state_c, Ps[nb], N1, "offset", 0.5 * side)
+                each = N1 + (state_c - Ps[nb])
             else:
                 each, spread, place = np.zeros((0, 2)), 0.0, cv.copy()
             taken = np.array([p for o, p in now.items() if o != j]).reshape(-1, 2)
-            place, kind = self.place(rng, place, taken, side)
+            if self.on_taken(place, b[2:], now, at_t, j):
+                continue
             tb = gt.get(u, {}).get(j)
             tb = (tb.copy() if tb is not None else at_r[j].copy())
-            tb[:2] += rng.normal(0, 0.05, 2) * np.sqrt(tb[2] * tb[3])
+            tb[:2] += rng.normal(0, 0.05, 2) * np.sqrt(tb[2] * tb[3]) + (shift if kind == 2 else 0)
             g = at_t.get(j)
             g = None if g is None else np.r_[centre(g), g[2:]]
             q = make_query(centre=place, box=b, tbox=tb, cv=cv, vel=vel, gap=k, nb=each, spread=spread, occ=taken,
@@ -125,18 +133,30 @@ class TrackSamples(Dataset):
         return lt, lu, queries
 
     @staticmethod
-    def place(rng, place, taken, side):
-        """Placement noise. kind 0: N(0, s side), s ~ U(0, 0.5); 1: on a member tracked now within 4 sides (p 0.15);
-        2: displaced by 2-5 sides in a random direction (p 0.2), mostly leaving the track's UAV outside the window."""
+    def on_taken(place, wh, now, at_t, own):
+        """The tracker never looks where its estimated box overlaps a member tracked in this frame (IoU >= 0.3)."""
+        others = [o for o in now if o != own]
+        if not others:
+            return False
+        tb = np.array([np.r_[now[o] - at_t[o][2:] / 2, at_t[o][2:]] for o in others])
+        return iou_matrix(np.r_[place - wh / 2, wh], tb).max() >= 0.3
+
+    @staticmethod
+    def state(rng, true_c, P0, a, side):
+        """The track's own centre at r as the tracker holds it. The window is then placed by the inference rule
+        (formation estimate, else constant velocity), so no sample can be told apart by where the window sits
+        relative to the formation or motion cues. kind 0: N(0, s side), s ~ U(0, 0.5); 1 (p 0.15): the track sits on
+        another member within 4 sides (it drifted to a neighbour); 2 (p 0.2): displaced by 2-5 sides (template too)."""
         u = rng.random()
-        if u < 0.15 and len(taken):
-            close = taken[np.linalg.norm(taken - place, axis=1) < 4 * side]
-            if len(close):
-                return close[int(rng.integers(len(close)))].copy(), 1
+        if u < 0.15:
+            d = np.linalg.norm(P0 - true_c, axis=1)
+            close = [x for x in range(len(P0)) if x != a and d[x] < 4 * side]
+            if close:
+                return P0[close[int(rng.integers(len(close)))]] + rng.normal(0, 0.05, 2) * side, 1
         if u < 0.35:
-            a = rng.uniform(0, 2 * np.pi)
-            return place + rng.uniform(2, 5) * side * np.array([np.cos(a), np.sin(a)]), 2
-        return place + rng.normal(0, rng.uniform(0, 0.5), 2) * side, 0
+            ang = rng.uniform(0, 2 * np.pi)
+            return true_c + rng.uniform(2, 5) * side * np.array([np.cos(ang), np.sin(ang)]), 2
+        return true_c + rng.normal(0, rng.uniform(0, 0.5), 2) * side, 0
 
     def background(self, rng, at_r, at_t, P0, sides_r, now, k, W, H, ratio, flip, n):
         """kind 3: tracks that never were a UAV (a track born on clutter): a box at a place with no annotated UAV
@@ -169,7 +189,8 @@ class TrackSamples(Dataset):
             else:
                 each, spread, place = np.zeros((0, 2)), 0.0, cv
             taken = np.array(list(now.values())).reshape(-1, 2)
-            place, _ = self.place(rng, place, np.zeros((0, 2)), side)
+            if self.on_taken(place, b[2:], now, at_t, None):
+                continue
             q = make_query(centre=place, box=b, tbox=b, cv=cv, vel=vel, gap=k, nb=each, spread=spread, occ=taken,
                            member_sides=sides_r, W=W, H=H, r=ratio, flip=flip, gt=None)
             if len(C_t):  # a window that happens to contain a UAV would teach "the track is that UAV": skip
