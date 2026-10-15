@@ -55,7 +55,11 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         info = seq_info(data / name)
         shape = (info["imHeight"], info["imWidth"])
         raw = np.loadtxt(root / cell["detections"] / name / "det.txt", delimiter=",", ndmin=2)
-        tracker = BYTETracker(SimpleNamespace(**{**cfg["tracker"], **arm.get("tracker", {})}), frame_rate=info["frameRate"])  # per-arm overrides (diagnostics)
+        targs = {**cfg["tracker"], **arm.get("tracker", {})}  # per-arm overrides (diagnostics; Exp074 track_buffer / freeze_lost)
+        if arm.get("gmc"):  # Exp074: frame-to-frame camera motion estimated beforehand (Exp055 estimator), row `f a b tx c d ty`
+            w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
+            targs["gmc_warps"] = {int(r[0]): r[1:].reshape(2, 3) for r in w}
+        tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
         rows = []
