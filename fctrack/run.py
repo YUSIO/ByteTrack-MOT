@@ -62,6 +62,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
+            w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
+            fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
         rows = []
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]

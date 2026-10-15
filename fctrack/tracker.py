@@ -12,6 +12,7 @@ from collections import Counter
 import numpy as np
 
 from fctrack.formation import OutlierFilter, PaperOutlierFilter, estimate, select_neighbours
+from fctrack.relink import carry
 
 
 def wrap_stracks(STrack):
@@ -64,6 +65,10 @@ class FCTrack:
             self.filter = OutlierFilter(self.out["history"], self.out["percentile"], self.out["regulariser"])
         self.first_filter = bool(self.out) and self.out.get("order") == "paper"
         self.stats = Counter()
+        self.relab = cfg.get("relabel")  # Exp077: {"family", "tau", "gap"}; None keeps the tracker unchanged
+        self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
+        self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
+        self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -91,7 +96,60 @@ class FCTrack:
             self.snap = {f: self.snap[f]}
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
+        if self.relab:
+            self.relabel_births(f, rows)
+            self.hist[f] = {}
+            for tid, box, _, _ in rows:
+                if box[2] * box[3] > 0:
+                    c = box[:2] + box[2:] / 2
+                    self.hist[f][tid] = c
+                    self.lastw[tid] = (f, c, float(np.sqrt(box[2] * box[3])))
+            for old in [x for x in self.hist if x < f - self.relab["gap"] - 1]:
+                del self.hist[old]
         return [(tid, box, score) for tid, box, score, _ in rows]
+
+    def relabel_births(self, f, rows):
+        """Exp077, closed-loop form of Exp076, run on the rows of this frame after the fill-in (as the open-loop pass saw
+        them): a track written for the first time takes the id of the nearest member that is not written now and was
+        last written within `gap` frames, when that member's last centre carried to this frame (fctrack.relink.carry)
+        is within `tau` sides of the new box. The old track is dropped from the tracker's Lost and Removed lists, so
+        from now on the tracker and the fill-in see one track. Changes `rows` in place."""
+        r = self.relab
+        births = [k for k, row in enumerate(rows) if row[0] not in self.lastw and row[1][2] * row[1][3] > 0]
+        if not births or f == 1:
+            return
+        now = {row[0] for row in rows}
+        cur = {row[0]: row[1][:2] + row[1][2:] / 2 for row in rows if row[0] in self.lastw}
+        pairs = []
+        for i, k in enumerate(births):
+            b = rows[k][1]
+            c0, side = b[:2] + b[2:] / 2, float(np.sqrt(max(b[2] * b[3], 1.0)))
+            for L, (f1, c1, side1) in self.lastw.items():
+                if L in now or not 1 <= f - f1 <= r["gap"]:
+                    continue
+                p = carry(r["family"], c1, side1, f1, f, L, {f1: self.hist.get(f1, {}), f: cur}, self.warps)
+                d = float(np.linalg.norm(p - c0)) / side
+                if d <= r["tau"]:
+                    pairs.append((d, i, L))
+        done_i, done_L = set(), set()
+        for d, i, L in sorted(pairs):
+            if i in done_i or L in done_L:
+                continue
+            done_i.add(i); done_L.add(L)
+            row = rows[births[i]]
+            self.t.lost_stracks = [x for x in self.t.lost_stracks if x.track_id != L]
+            self.t.removed_stracks = [x for x in self.t.removed_stracks if x.track_id != L]
+            old = row[0]
+            row[3].track_id = L
+            row[0] = L
+            if old in self.meta:  # the new track's own bookkeeping continues under the old id
+                m = self.meta.pop(old)
+                self.meta[L] = {**self.meta.get(L, {}), **{k: v for k, v in m.items() if k in ("real", "box")},
+                                "obs": self.meta.get(L, {}).get("obs", 0) + m.get("obs", 0)}
+            for snap in self.snap.values():
+                if old in snap:
+                    snap[L] = snap.pop(old)
+            self.stats["relabelled"] += 1
 
     def recover(self, f, det, cur, W, H, image):
         r = self.rec
