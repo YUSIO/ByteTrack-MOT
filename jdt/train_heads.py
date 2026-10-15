@@ -56,7 +56,7 @@ def iou_cxcywh(a, b):
 def validate(det, heads, loader, device):
     for h in heads.values():
         h.eval()
-    acc = {n: {"p": [], "y": [], "iou": []} for n in heads}
+    acc = {n: {"p": [], "y": [], "iou": [], "kind": []} for n in heads}
     for batch in loader:
         outs, q = run_batch(det, heads, batch, device)
         if outs is None:
@@ -65,15 +65,21 @@ def validate(det, heads, loader, device):
             p, box = decode_box(o, q)
             acc[n]["p"].append(p.cpu())
             acc[n]["y"].append(q["exist"].cpu())
+            acc[n]["kind"].append(q["kind"].cpu())
             pos = q["exist"] > 0.5
             acc[n]["iou"].append(iou_cxcywh(box[pos], q["gt"][pos]).cpu())
     res = {}
     for n, a in acc.items():
-        p, y, iou = torch.cat(a["p"]).numpy(), torch.cat(a["y"]).numpy(), torch.cat(a["iou"]).numpy()
+        p, y, iou, kind = torch.cat(a["p"]).numpy(), torch.cat(a["y"]).numpy(), torch.cat(a["iou"]).numpy(), torch.cat(a["kind"]).numpy()
         r = {"samples": int(len(y)), "positives": int((y > 0.5).sum()), "auc": auc(p, y), "box_iou_ge_0.5": float((iou >= 0.5).mean()), "box_iou_mean": float(iou.mean())}
         for thr in (0.5, 0.7, 0.9):
             r[f"recall_at_p{thr}"] = float((p[y > 0.5] >= thr).mean())
             r[f"false_accept_at_p{thr}"] = float((p[y < 0.5] >= thr).mean())
+        for kd, nm in ((0, "jitter"), (1, "on_member"), (2, "displaced"), (3, "background")):
+            sel = kind == kd
+            r[f"n_{nm}"], r[f"pos_{nm}"] = int(sel.sum()), int((y[sel] > 0.5).sum())
+            r[f"accept_p0.7_pos_{nm}"] = float((p[sel & (y > 0.5)] >= 0.7).mean()) if (sel & (y > 0.5)).any() else None
+            r[f"accept_p0.7_neg_{nm}"] = float((p[sel & (y < 0.5)] >= 0.7).mean()) if (sel & (y < 0.5)).any() else None
         res[n] = r
     for h in heads.values():
         h.train()

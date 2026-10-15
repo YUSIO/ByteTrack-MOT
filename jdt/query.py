@@ -53,10 +53,11 @@ def make_query(*, centre, box, tbox, cv, vel, gap, nb, spread, occ, member_sides
         q["exist"] = float(abs(g[0] - q["centre"][0]) <= q["half"] and abs(g[1] - q["centre"][1]) <= q["half"])
     else:
         q["gt"], q["exist"] = np.r_[q["centre"], q["wh"]], 0.0
+    q["kind"] = 0.0
     return q
 
 
-KEYS = ("centre", "half", "side", "wh", "tbox", "cv", "vel", "gap", "spread", "geo", "nb", "nb_mask", "occ", "occ_mask", "gt", "exist")
+KEYS = ("centre", "half", "side", "wh", "tbox", "cv", "vel", "gap", "spread", "geo", "nb", "nb_mask", "occ", "occ_mask", "gt", "exist", "kind")
 
 
 def stack(queries, device):

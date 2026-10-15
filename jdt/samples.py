@@ -107,24 +107,78 @@ class TrackSamples(Dataset):
             else:
                 each, spread, place = np.zeros((0, 2)), 0.0, cv.copy()
             taken = np.array([p for o, p in now.items() if o != j]).reshape(-1, 2)
-            if self.train and rng.random() < 0.15 and len(taken):
-                close = taken[np.linalg.norm(taken - place, axis=1) < 4 * side]
-                if len(close):
-                    place = close[int(rng.integers(len(close)))].copy()
-            else:
-                place = place + rng.normal(0, rng.uniform(0, 0.5), 2) * side
+            place, kind = self.place(rng, place, taken, side)
             tb = gt.get(u, {}).get(j)
             tb = (tb.copy() if tb is not None else at_r[j].copy())
             tb[:2] += rng.normal(0, 0.05, 2) * np.sqrt(tb[2] * tb[3])
             g = at_t.get(j)
             g = None if g is None else np.r_[centre(g), g[2:]]
-            queries.append(make_query(centre=place, box=b, tbox=tb, cv=cv, vel=vel, gap=k, nb=each, spread=spread, occ=taken,
-                                      member_sides=sides_r, W=W, H=H, r=ratio, flip=flip, gt=g))
+            q = make_query(centre=place, box=b, tbox=tb, cv=cv, vel=vel, gap=k, nb=each, spread=spread, occ=taken,
+                           member_sides=sides_r, W=W, H=H, r=ratio, flip=flip, gt=g)
+            q["kind"] = kind
+            queries.append(q)
+        queries += self.background(rng, at_r, at_t, P0, sides_r, now, k, W, H, ratio, flip, max(1, int(round(0.3 * len(order)))) if len(ids_r) else 0)
         img_t, img_u = self.image(S, t, flip), self.image(S, u, flip)
         lt, rt = letterbox(img_t)
         lu, _ = letterbox(img_u)
         assert abs(rt - ratio) < 1e-12
         return lt, lu, queries
+
+    @staticmethod
+    def place(rng, place, taken, side):
+        """Placement noise. kind 0: N(0, s side), s ~ U(0, 0.5); 1: on a member tracked now within 4 sides (p 0.15);
+        2: displaced by 2-5 sides in a random direction (p 0.2), mostly leaving the track's UAV outside the window."""
+        u = rng.random()
+        if u < 0.15 and len(taken):
+            close = taken[np.linalg.norm(taken - place, axis=1) < 4 * side]
+            if len(close):
+                return close[int(rng.integers(len(close)))].copy(), 1
+        if u < 0.35:
+            a = rng.uniform(0, 2 * np.pi)
+            return place + rng.uniform(2, 5) * side * np.array([np.cos(a), np.sin(a)]), 2
+        return place + rng.normal(0, rng.uniform(0, 0.5), 2) * side, 0
+
+    def background(self, rng, at_r, at_t, P0, sides_r, now, k, W, H, ratio, flip, n):
+        """kind 3: tracks that never were a UAV (a track born on clutter): a box at a place with no annotated UAV
+        within 3 sides at r and t, a small random velocity, formation offsets to the real members; always absent."""
+        out = []
+        C_t = np.array([centre(b) for b in at_t.values()]).reshape(-1, 2)
+        for _ in range(n):
+            a = int(rng.integers(len(P0)))
+            src = list(at_r.values())[a]
+            side = sides_r[a]
+            for _ in range(20):
+                c = np.array([rng.uniform(0.02, 0.98) * W, rng.uniform(0.02, 0.98) * H])
+                far = lambda C: len(C) == 0 or np.linalg.norm(C - c, axis=1).min() > 3 * side
+                if far(P0) and far(C_t):
+                    break
+            else:
+                continue
+            w, h = src[2] * np.exp(rng.normal(0, 0.1)), src[3] * np.exp(rng.normal(0, 0.1))
+            b = np.array([c[0] - w / 2, c[1] - h / 2, w, h])
+            vel = rng.normal(0, 0.3, 2) * side
+            cv = c + k * vel
+            ids = list(at_r)
+            Pb = np.vstack((P0, c))
+            avail = np.array([i in now for i in ids] + [False])
+            nb = select_neighbours(Pb, len(ids), avail, "delaunay", 6) if avail.any() else []
+            if nb:
+                N1 = np.array([now[ids[x]] for x in nb])
+                est, spread, _ = estimate(c, Pb[nb], N1, "offset", 0.5 * side)
+                each, place = N1 + (c - Pb[nb]), est
+            else:
+                each, spread, place = np.zeros((0, 2)), 0.0, cv
+            taken = np.array(list(now.values())).reshape(-1, 2)
+            place, _ = self.place(rng, place, np.zeros((0, 2)), side)
+            q = make_query(centre=place, box=b, tbox=b, cv=cv, vel=vel, gap=k, nb=each, spread=spread, occ=taken,
+                           member_sides=sides_r, W=W, H=H, r=ratio, flip=flip, gt=None)
+            if len(C_t):  # a window that happens to contain a UAV would teach "the track is that UAV": skip
+                cn = (np.array([W - C_t[:, 0], C_t[:, 1]]).T if flip else C_t) * ratio
+                if (np.abs(cn - q["centre"]).max(1) <= q["half"]).any():
+                    continue
+            q["kind"] = 3
+            out.append(q)
+        return out
 
     def image(self, S, f, flip):
         img = cv2.imread(str(S["dir"] / "img1" / f"{f:06d}.jpg"))
