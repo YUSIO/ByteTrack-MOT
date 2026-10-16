@@ -83,6 +83,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
+        if attempts_dir is not None and fc.ros:  # Exp083: one row per slot claim
+            (attempts_dir / f"{name}.claims.csv").write_text("frame,label,kind,cost,p,score,x,y,w,h\n" + "".join(
+                ",".join(repr(v) if isinstance(v, float) else str(v) for v in c) + "\n" for c in fc.claims))
         if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
             (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(
                 ",".join(repr(v) if isinstance(v, float) else str(v) for v in a) + "\n" for a in fc.attempts))

@@ -10,6 +10,7 @@ estimators `kalman` (the track's own prediction) and `hold` (its last box) are t
 from collections import Counter
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from fctrack.formation import OutlierFilter, PaperOutlierFilter, estimate, select_neighbours
 from fctrack.relink import carry
@@ -69,6 +70,8 @@ class FCTrack:
         self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
+        self.ros = cfg.get("roster")     # Exp083: {"probe", "weak", "p_weak"}; replaces `recover` + `relabel_births` by one joint assignment
+        self.claims = []                 # Exp083: one record per slot claim (read only)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -89,7 +92,7 @@ class FCTrack:
             cur = {tid: b for tid, b in cur.items() if tid in kept}
         self.snap[f] = {tid: b[:2] + b[2:] / 2 for tid, b in cur.items()}
         if self.rec:
-            rows += self.recover(f, det, cur, W, H, image)
+            rows += self.roster_step(f, det, cur, W, H, image, rows) if self.ros else self.recover(f, det, cur, W, H, image)
             for old in [x for x in self.snap if x < f - self.rec["lookback"] - 1]:
                 del self.snap[old]
         else:
@@ -97,7 +100,8 @@ class FCTrack:
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         if self.relab:
-            self.relabel_births(f, rows)
+            if not self.ros:
+                self.relabel_births(f, rows)
             self.hist[f] = {}
             for tid, box, _, _ in rows:
                 if box[2] * box[3] > 0:
@@ -150,6 +154,153 @@ class FCTrack:
                 if old in snap:
                     snap[L] = snap.pop(old)
             self.stats["relabelled"] += 1
+
+    def roster_step(self, f, det, cur, W, H, image, rows):
+        """Exp083: one assignment per frame between the absent slots and everything that can occupy a slot this frame.
+
+        Slots are the labels last written within `relabel.gap` frames that are not written now. Columns are
+          birth  a track written for the first time (detector evidence), as in `relabel_births`;
+          weak   a detector box (score > 0.1) that no track holds, accepted when the verifier gives p >= p_weak;
+          probe  the verified box at the slot's own estimate (the Exp070 fill-in), accepted at p >= p_min.
+        Cost is the distance in box sides between the column's box and the slot's position (carried last centre for birth
+        and weak, the proposal of the fill-in for probe); a birth or weak column is feasible within `relabel.tau` sides.
+        The assignment is exclusive; boxes that overlap an already accepted box (IoU >= iou_free) are dropped, so a member
+        is never written twice. Changes `rows` in place (births) and returns the rows written by claims."""
+        r, o, rl = self.rec, self.ros, self.relab
+        cur_boxes = np.array(list(cur.values())).reshape(-1, 4)
+        now = {row[0] for row in rows}
+        slots = [L for L, v in self.lastw.items() if L not in now and 1 <= f - v[0] <= rl["gap"]]
+        if not slots:
+            return []
+        cur_c = {row[0]: row[1][:2] + row[1][2:] / 2 for row in rows if row[0] in self.lastw}
+        cache = {}
+
+        def pos(L):  # where slot L is expected now (fctrack.relink.carry, the family of the relabel block)
+            if L not in cache:
+                f1, c1, side1 = self.lastw[L]
+                cache[L] = carry(rl["family"], c1, side1, f1, f, L, {f1: self.hist.get(f1, {}), f: cur_c}, self.warps)
+            return cache[L]
+
+        cols = []  # dict(kind, box, score, p, owner, costs{label: cost})
+
+        def near(box, taus):
+            c, s = box[:2] + box[2:] / 2, float(np.sqrt(max(box[2] * box[3], 1.0)))
+            out = {}
+            for L in slots:
+                d = float(np.linalg.norm(pos(L) - c)) / s
+                if d <= taus:
+                    out[L] = d
+            return out
+
+        if f != 1:
+            for k, row in enumerate(rows):
+                if row[0] not in self.lastw and row[1][2] * row[1][3] > 0:
+                    cs = near(row[1], rl["tau"])
+                    if cs:
+                        cols.append({"kind": "birth", "box": row[1], "score": row[2], "p": 1.0, "row": k, "costs": cs})
+        if o.get("weak") and self.verify is not None:
+            usable = det[det[:, 4] > 0.1]
+            if len(usable):
+                tl = np.column_stack((usable[:, :2], usable[:, 2:4] - usable[:, :2])).astype(float)
+                blocked = np.array([x.tlwh for x in self.t.tracked_stracks]).reshape(-1, 4)  # includes tracks born in this frame
+                keep = np.ones(len(tl), bool)
+                if len(blocked):
+                    keep &= iou_matrix(tl, blocked).max(1) < r["iou_free"]
+                if len(cur_boxes):
+                    keep &= iou_matrix(tl, cur_boxes).max(1) < r["iou_free"]
+                cand = [(i, near(tl[i], rl["tau"])) for i in np.where(keep)[0]]
+                cand = [(i, cs) for i, cs in cand if cs]
+                if cand:
+                    p, fin = self.verify(image(), tl[[i for i, _ in cand]])
+                    for j, (i, cs) in enumerate(cand):
+                        if p[j] >= o["p_weak"] and fin[j, 2] > 1 and fin[j, 3] > 1:
+                            cols.append({"kind": "weak", "box": tl[i], "score": float(usable[i, 4]), "p": float(p[j]), "costs": cs})
+        if o.get("probe") and self.verify is not None:
+            cands = []
+            for t in self.t.lost_stracks:
+                m = self.meta.get(t.track_id)
+                gap = f - t.frame_id
+                if m is None or not t.is_activated or t.track_id not in slots or not 1 <= gap <= r["lookback"] \
+                        or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
+                    continue
+                size = m["box"][2:]
+                for est in r["estimator"].split("|"):  # "a|b": b only when a has no answer (no neighbour)
+                    got = self.position(t, m, est, cur, size)
+                    if got is not None:
+                        break
+                if got is None or not (0 <= got[0][0] < W and 0 <= got[0][1] < H):
+                    continue
+                cands.append((t, np.r_[got[0] - size / 2, size], got[0]))
+            if cands:
+                boxes = np.array([b for _, b, _ in cands])
+                keep = np.ones(len(cands), bool)
+                if len(cur_boxes):
+                    keep &= iou_matrix(boxes, cur_boxes).max(1) < r["iou_free"]
+                cands, boxes = [c for c, k in zip(cands, keep) if k], boxes[keep]
+                self.stats["tried"] += len(cands)
+                if cands:
+                    p, final = self.verify(image(), boxes)
+                    for _ in range(r.get("iterations", 1) - 1):
+                        p, final = self.verify(image(), final)
+                    if not r["use_regressed_box"]:
+                        final = boxes
+                    for i, (t, _, est) in enumerate(cands):
+                        if p[i] >= r["p_min"] and final[i, 2] > 1 and final[i, 3] > 1:
+                            c, s = final[i, :2] + final[i, 2:] / 2, float(np.sqrt(final[i, 2] * final[i, 3]))
+                            cols.append({"kind": "probe", "box": final[i].copy(), "score": r["score"], "p": float(p[i]), "track": t,
+                                         "costs": {t.track_id: float(np.linalg.norm(c - est)) / s}})
+        if not cols:
+            return []
+        idx = {L: i for i, L in enumerate(slots)}
+        big = 1e6
+        cost = np.full((len(slots), len(cols)), big)
+        for j, c in enumerate(cols):
+            for L, d in c["costs"].items():
+                cost[idx[L], j] = d
+        ri, ci = linear_sum_assignment(cost)
+        match = sorted((cost[i, j], i, j) for i, j in zip(ri, ci) if cost[i, j] < big)
+        added, taken = [], cur_boxes
+        for d, i, j in match:
+            L, c = slots[i], cols[j]
+            box = np.asarray(c["box"], float)
+            if c["kind"] != "birth":
+                if len(taken) and iou_matrix(box, taken).max() >= r["iou_free"]:
+                    continue
+                taken = np.vstack((taken, box))
+            if c["kind"] == "birth":
+                row = rows[c["row"]]
+                self.t.lost_stracks = [x for x in self.t.lost_stracks if x.track_id != L]
+                self.t.removed_stracks = [x for x in self.t.removed_stracks if x.track_id != L]
+                old = row[0]
+                row[3].track_id = L
+                row[0] = L
+                if old in self.meta:
+                    m = self.meta.pop(old)
+                    self.meta[L] = {**self.meta.get(L, {}), **{k: v for k, v in m.items() if k in ("real", "box")},
+                                    "obs": self.meta.get(L, {}).get("obs", 0) + m.get("obs", 0)}
+                for snap in self.snap.values():
+                    if old in snap:
+                        snap[L] = snap.pop(old)
+            else:
+                t = c.get("track")
+                if t is None:
+                    t = next((x for x in self.t.lost_stracks if x.track_id == L and x.is_activated), None)
+                if t is not None:
+                    t.re_activate(self.STrack(box, c["score"]), f, new_id=False)
+                else:  # the tracker has dropped the track: a new track under the old label
+                    t = self.STrack(box, c["score"])
+                    t.activate(self.t.kalman_filter, f)
+                    t.track_id, t.is_activated = L, True
+                self.t.lost_stracks = [x for x in self.t.lost_stracks if x.track_id != L]
+                self.t.removed_stracks = [x for x in self.t.removed_stracks if x.track_id != L]
+                self.t.tracked_stracks = [x for x in self.t.tracked_stracks if x is not t] + [t]
+                m = self.meta.setdefault(L, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
+                m.update(real=f, obs=m["obs"] + 1, box=box.copy())
+                self.snap[f][L] = box[:2] + box[2:] / 2
+                added.append([L, box.copy(), float(c["score"]), t])
+            self.stats["claim_" + c["kind"]] += 1
+            self.claims.append((f, L, c["kind"], float(d), c["p"], float(c["score"]), *map(float, box)))
+        return added
 
     def recover(self, f, det, cur, W, H, image):
         r = self.rec
