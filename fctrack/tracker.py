@@ -13,6 +13,7 @@ import numpy as np
 
 from fctrack.formation import OutlierFilter, PaperOutlierFilter, estimate, select_neighbours
 from fctrack.relink import carry
+from fctrack import phit as phit_model
 
 
 def wrap_stracks(STrack):
@@ -65,6 +66,10 @@ class FCTrack:
             self.filter = OutlierFilter(self.out["history"], self.out["percentile"], self.out["regulariser"])
         self.first_filter = bool(self.out) and self.out.get("order") == "paper"
         self.stats = Counter()
+        self.phit = None  # Exp078: loaded model when the arm's recover block has "phit": {"model": path, "mode": "write" | "both", "tau": 0.5}
+        if self.rec and self.rec.get("phit"):
+            self.phit = phit_model.load(self.rec["phit"]["model"])
+        self._extra = (0, 0.0)
         self.relab = cfg.get("relabel")  # Exp077: {"family", "tau", "gap"}; None keeps the tracker unchanged
         self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
@@ -156,7 +161,7 @@ class FCTrack:
         cur_boxes = np.array(list(cur.values())).reshape(-1, 4)
         usable = det[det[:, 4] > 0.1]
         usable_tlwh = np.column_stack((usable[:, :2], usable[:, 2:4] - usable[:, :2])) if len(usable) else np.zeros((0, 4))
-        cands = []
+        cands, extras = [], []
         for t in self.t.lost_stracks:
             m = self.meta.get(t.track_id)
             gap = f - t.frame_id
@@ -165,12 +170,14 @@ class FCTrack:
             size = m["box"][2:]
             for spec in r["estimator"].split("+"):  # "a+b": both positions are tried, the better verified one is kept
                 for est in spec.split("|"):         # "a|b": b only when a has no answer (no neighbour)
+                    self._extra = (0, 0.0)
                     got = self.position(t, m, est, cur, size)
                     if got is not None:
                         break
                 if got is None or not (0 <= got[0][0] < W and 0 <= got[0][1] < H):
                     continue
                 cands.append((t, np.r_[got[0] - size / 2, size], got[1]))
+                extras.append(self._extra)
         if not cands:
             return []
         boxes = np.array([b for _, b, _ in cands])
@@ -179,7 +186,7 @@ class FCTrack:
             keep &= iou_matrix(boxes, cur_boxes).max(1) < r["iou_free"]
         if r["skip_if_detected"] and len(usable_tlwh):  # the detector already has a box there: leave it to the association
             keep &= iou_matrix(boxes, usable_tlwh).max(1) < r["iou_free"]
-        cands, boxes = [c for c, k in zip(cands, keep) if k], boxes[keep]
+        cands, boxes, extras = [c for c, k in zip(cands, keep) if k], boxes[keep], [e for e, k in zip(extras, keep) if k]
         self.stats["tried"] += len(cands)
         if not cands:
             return []
@@ -191,19 +198,39 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
-        if self.log:  # state before any decision of this frame (re-activation below changes frame_id and covariance)
-            pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
-                    float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]
+        # state before any decision of this frame (re-activation below changes frame_id and covariance)
+        pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
+                float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]
+        # evidence known at decision time: the detector's boxes (score > 0.1) and the members tracked now, at the verified box
+        det_iou, det_score, cur_iou = np.zeros(len(cands)), np.zeros(len(cands)), np.zeros(len(cands))
+        if len(usable_tlwh):
+            I = iou_matrix(final, usable_tlwh)
+            k = I.argmax(1)
+            det_iou, det_score = I[np.arange(len(cands)), k], usable[k, 4].astype(float) * (I[np.arange(len(cands)), k] > 0)
+        if len(cur_boxes):
+            cur_iou = iou_matrix(final, cur_boxes).max(1)
+        phat = np.full(len(cands), np.nan)
+        if self.phit is not None:
+            for i, (t, prop, used) in enumerate(cands):
+                gap, since_real, obs, cxx, cyy = pre[i]
+                raw = dict(zip(("prop_x", "prop_y", "prop_w", "prop_h"), map(float, prop)))
+                raw.update(zip(("final_x", "final_y", "final_w", "final_h"), map(float, final[i])))
+                raw.update(p=float(p[i]), gap=gap, since_real=since_real, obs=obs, cov_x=cxx, estimator=used, n_nb=extras[i][0],
+                           spread=extras[i][1], det_iou=float(det_iou[i]), det_score=float(det_score[i]), cur_iou=float(cur_iou[i]))
+                phat[i] = phit_model.predict(self.phit, phit_model.featurize(raw))
+        mode, ptau = (self.rec["phit"]["mode"], self.rec["phit"].get("tau", 0.5)) if self.phit is not None else (None, None)
         added, taken, done = [], cur_boxes, set()
-        decision = ["below_p" if p[i] < r["p_min"] else "" for i in range(len(cands))]
-        for i in np.argsort(-p):
-            if p[i] < r["p_min"] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
+        below = [(phat[i] <= ptau) if mode == "both" else (p[i] < r["p_min"]) for i in range(len(cands))]
+        decision = [("below_phit" if mode == "both" else "below_p") if below[i] else "" for i in range(len(cands))]
+        for i in (np.argsort(-phat) if mode == "both" else np.argsort(-p)):
+            if below[i] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
                 decision[i] = decision[i] or ("done" if cands[i][0].track_id in done else "degenerate")
                 continue
             if len(taken) and iou_matrix(final[i], taken).max() >= r["iou_free"]:
                 decision[i] = "overlap"
                 continue
-            decision[i] = "written" if r.get("write", True) else "kept_unwritten"
+            write_i = r.get("write", True) and not (mode == "write" and phat[i] <= ptau)  # mode "write": the model only decides the written box
+            decision[i] = "written" if write_i else "kept_unwritten"
             t = cands[i][0]
             done.add(t.track_id)
             t.re_activate(self.STrack(final[i], r["score"]), f, new_id=False)
@@ -212,7 +239,7 @@ class FCTrack:
             self.snap[f][t.track_id] = final[i, :2] + final[i, 2:] / 2
             self.meta[t.track_id]["box"] = final[i].copy() if r["use_regressed_box"] else self.meta[t.track_id]["box"]
             taken = np.vstack((taken, final[i]))
-            if r.get("write", True):  # write = False: the fill-in only keeps the track alive inside the tracker (diagnostic)
+            if write_i:  # write = False: the fill-in only keeps the track alive inside the tracker (diagnostic)
                 added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
@@ -220,7 +247,8 @@ class FCTrack:
             for i, (t, prop, used) in enumerate(cands):
                 gap, since_real, obs, cxx, cyy = pre[i]
                 self.attempts.append([f, t.track_id, gap, since_real, obs, used, *map(float, prop), *map(float, final[i]),
-                                      float(p[i]), decision[i], cxx, cyy])
+                                      float(p[i]), decision[i], cxx, cyy, extras[i][0], extras[i][1], float(det_iou[i]),
+                                      float(det_score[i]), float(cur_iou[i]), float(phat[i])])
         return added
 
     def position(self, t, m, est, cur, size):
@@ -245,7 +273,8 @@ class FCTrack:
             eps = r.get("consistency_area_fraction", 0.1) * float(size[0] * size[1])
         else:
             eps = r["consistency_sides"] * float(np.sqrt(size[0] * size[1]))
-        c, _, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], eps)
+        c, spread, used = estimate(P0[ids.index(t.track_id)], P0[nb], N1, r["model"], eps)
+        self._extra = (len(nb), float(spread))
         return c, used
 
     def hold_back(self, f, rows, image):

@@ -32,7 +32,7 @@ def seq_info(seq_dir):
 
 
 ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,prop_w,prop_h,"
-                   "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y")
+                   "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y,n_nb,spread,det_iou,det_score,cur_iou,phit")
 
 
 def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
