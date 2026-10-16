@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
 from yolox.tracker import matching
+from yolox.tracker.struct_cost import FrameContext
 from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
@@ -209,6 +210,8 @@ class BYTETracker(object):
         remain_inds = scores > self.args.track_thresh
         inds_low = scores > 0.1
         inds_high = scores < self.args.track_thresh
+        struct_cfg = getattr(self.args, 'struct', None)  # Exp082: structure terms in the association cost (off by default)
+        ref_pos = np.cumsum(inds_low) - 1  # index of a box (score > 0.1) among all reference boxes
 
         inds_second = np.logical_and(inds_low, inds_high)
         dets_second = bboxes[inds_second]
@@ -220,6 +223,8 @@ class BYTETracker(object):
             '''Detections'''
             detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
                           (tlbr, s) in zip(dets, scores_keep)]
+            for det, ri in zip(detections, ref_pos[remain_inds]):
+                det.ridx = int(ri)
         else:
             detections = []
 
@@ -253,6 +258,10 @@ class BYTETracker(object):
         if warp is not None:
             STrack.multi_gmc(strack_pool, warp)
             STrack.multi_gmc(unconfirmed, warp)
+        sctx = None
+        if struct_cfg:
+            tb = bboxes[inds_low]
+            sctx = FrameContext(struct_cfg, tracked_stracks, np.column_stack(((tb[:, 0] + tb[:, 2]) / 2, (tb[:, 1] + tb[:, 3]) / 2)), self.frame_id)
         # Default 'iou' is upstream ByteTrack; 'm2da' follows HOMATracker Eqs. (9)-(13).
         first_stage_cost = getattr(self.args, 'first_stage_cost', 'iou')
         if homa is not None:
@@ -267,6 +276,8 @@ class BYTETracker(object):
             raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
         if homa is None and not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        if sctx is not None:
+            dists = sctx.blend(dists, strack_pool, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
@@ -285,6 +296,8 @@ class BYTETracker(object):
             '''Detections'''
             detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
                           (tlbr, s) in zip(dets_second, scores_second)]
+            for det, ri in zip(detections_second, ref_pos[inds_second]):
+                det.ridx = int(ri)
         else:
             detections_second = []
         # Exp070 diagnostic (off by default): tracks lost for at most `low_score_lost` frames also take low score boxes
@@ -292,6 +305,8 @@ class BYTETracker(object):
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked
                              or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        if sctx is not None:
+            dists = sctx.blend(dists, r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
@@ -314,6 +329,8 @@ class BYTETracker(object):
         dists = matching.iou_distance(unconfirmed, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        if sctx is not None:
+            dists = sctx.blend(dists, unconfirmed, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
