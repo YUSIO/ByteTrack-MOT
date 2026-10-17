@@ -189,7 +189,7 @@ class FCTrack:
         if not cands:
             return []
         states = None
-        if self.statelog is not None or r.get("decide") == "strn":  # Exp086: the inputs of every attempt
+        if self.statelog is not None or r.get("decide") in ("strn", "strn2"):  # Exp086 / Exp087: the inputs of every attempt
             states = [self.state_record(f, t, self.meta[t.track_id], b, used, cur, W) for (t, _, used), b in zip(cands, boxes)]
         if r.get("decide") == "strn":
             from fctrack.strn import inputs, predict
@@ -206,6 +206,16 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
+        if states is not None and self.verify is not None and r.get("decide") != "strn":  # Exp087: the verifier's answer
+            for i, st in enumerate(states):
+                st["vbox"], st["vp"] = [float(v) for v in final[i]], float(p[i])
+        if r.get("decide") == "strn2":  # Exp087: STRN second version chooses among the verifier box and detector boxes
+            from fctrack.strn2 import inputs2, predict2
+            model, dev = self.strn
+            img_t = image()
+            img_p = self.load_image(max(f - 1, 1))
+            samples = [inputs2(s, img_t, img_p, self.load_image(s["rframe"]), det, cur_boxes) for s in states]
+            p, final = predict2(model, samples, dev)
         if r.get("decide") == "oracle":  # Exp084: the decision is replaced by the annotation (the box stays the verifier's)
             g = self.gt.get(f, np.zeros((0, 4))) if self.gt is not None else np.zeros((0, 4))
             if len(g) and len(cur_boxes):

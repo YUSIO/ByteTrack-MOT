@@ -50,6 +50,11 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         from fctrack.strn import load as load_strn
         dev = torch.device(device)
         strn_model = (load_strn(root / arm["strn"]["weights"], dev), dev)
+    if arm.get("strn2"):  # Exp087
+        import torch
+        from fctrack.strn2 import load as load_strn2
+        dev = torch.device(device)
+        strn_model = (load_strn2(root / arm["strn2"]["weights"], dev), dev)
     data = root / cell["dataset_root"] / cell["split"]
     names = sorted(x.name for x in (root / cell["detections"]).glob("UAVSwarm-*") if x.is_dir())
     names = names[:limit] if limit else names
@@ -71,7 +76,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
-        if arm.get("strn"):  # Exp086: the learned re-observation model decides and gives the box
+        if arm.get("strn") or arm.get("strn2"):  # Exp086 / Exp087: the learned re-observation model decides and gives the box
             fc.strn = strn_model
         frames_cache = {}
 
