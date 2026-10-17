@@ -69,6 +69,7 @@ class FCTrack:
         self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
+        self.gt = None                   # Exp084: frame -> n x 4 annotated tlwh, set by the runner for `decide: oracle` arms only
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -191,6 +192,11 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
+        if r.get("decide") == "oracle":  # Exp084: the decision is replaced by the annotation (the box stays the verifier's)
+            g = self.gt.get(f, np.zeros((0, 4))) if self.gt is not None else np.zeros((0, 4))
+            if len(g) and len(cur_boxes):
+                g = g[iou_matrix(g, cur_boxes).max(1) < 0.5]  # members already covered by a tracked box earn nothing
+            p = (iou_matrix(final, g).max(1) >= 0.5).astype(float) if len(g) else np.zeros(len(cands))
         if self.log:  # state before any decision of this frame (re-activation below changes frame_id and covariance)
             pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
                     float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]

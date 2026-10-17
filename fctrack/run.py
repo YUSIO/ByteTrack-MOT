@@ -65,6 +65,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
+        if (arm.get("recover") or {}).get("decide") == "oracle":  # Exp084: annotations are read for the oracle decision only
+            g = np.loadtxt(data / name / "gt/gt.txt", delimiter=",", ndmin=2)
+            fc.gt = {int(k): g[g[:, 0] == k][:, 2:6] for k in np.unique(g[:, 0])}
         rows = []
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]
