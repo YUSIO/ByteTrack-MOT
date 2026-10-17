@@ -44,6 +44,12 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         spec = cell["verifiers"][arm["verifier"]]
         model = load(spec["kind"], root / spec["weights"], torch.device(device))
         verify = lambda img, boxes: apply(spec["kind"], model, img, boxes, torch.device(device))
+    strn_model = None
+    if arm.get("strn"):
+        import torch
+        from fctrack.strn import load as load_strn
+        dev = torch.device(device)
+        strn_model = (load_strn(root / arm["strn"]["weights"], dev), dev)
     data = root / cell["dataset_root"] / cell["split"]
     names = sorted(x.name for x in (root / cell["detections"]).glob("UAVSwarm-*") if x.is_dir())
     names = names[:limit] if limit else names
@@ -65,6 +71,20 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
+        if arm.get("strn"):  # Exp086: the learned re-observation model decides and gives the box
+            fc.strn = strn_model
+        frames_cache = {}
+
+        def load_image(k, name=name):
+            if k not in frames_cache:
+                if len(frames_cache) > 64:
+                    frames_cache.pop(next(iter(frames_cache)))
+                frames_cache[k] = cv2.imread(str(data / name / "img1" / f"{k:06d}.jpg"))
+            return frames_cache[k]
+
+        fc.load_image = load_image
+        if arm.get("statelog"):
+            fc.statelog = []
         if (arm.get("recover") or {}).get("decide") == "oracle":  # Exp084: annotations are read for the oracle decision only
             g = np.loadtxt(data / name / "gt/gt.txt", delimiter=",", ndmin=2)
             fc.gt = {int(k): g[g[:, 0] == k][:, 2:6] for k in np.unique(g[:, 0])}
@@ -86,6 +106,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
+        if fc.statelog is not None:  # Exp086: logged lost-track states for STRN training
+            sd = tracks.parent.parent / "states" / tracks.name
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / f"{name}.json").write_text(json.dumps({"states": fc.statelog, "tracked": {str(k): v for k, v in fc.statelog_tracked.items()}}))
         if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
             (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(
                 ",".join(repr(v) if isinstance(v, float) else str(v) for v in a) + "\n" for a in fc.attempts))

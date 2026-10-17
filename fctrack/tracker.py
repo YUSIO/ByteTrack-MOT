@@ -69,6 +69,10 @@ class FCTrack:
         self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
+        self.strn = None                 # Exp086: (model, device) for `decide: strn` arms
+        self.statelog = None             # Exp086: list of logged lost-track states (set by the runner), read only
+        self.statelog_tracked = {}       # Exp086: frame -> tracked boxes of the frames with logged states
+        self.load_image = None           # Exp086: frame index -> image (set by the runner)
         self.gt = None                   # Exp084: frame -> n x 4 annotated tlwh, set by the runner for `decide: oracle` arms only
 
     def step(self, det, shape, image):
@@ -83,7 +87,7 @@ class FCTrack:
             if t.frame_id == f:
                 cur[t.track_id] = box
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
-                m.update(real=f, obs=m["obs"] + 1, box=box)
+                m.update(real=f, obs=m["obs"] + 1, box=box, rbox=box)
         if self.first_filter and rows:  # the paper's order: outliers are removed before missing members are estimated
             rows = self.hold_back(f, rows, image)
             kept = {r[0] for r in rows}
@@ -184,7 +188,17 @@ class FCTrack:
         self.stats["tried"] += len(cands)
         if not cands:
             return []
-        if self.verify is not None:
+        states = None
+        if self.statelog is not None or r.get("decide") == "strn":  # Exp086: the inputs of every attempt
+            states = [self.state_record(f, t, self.meta[t.track_id], b, used, cur, W) for (t, _, used), b in zip(cands, boxes)]
+        if r.get("decide") == "strn":
+            from fctrack.strn import inputs, predict
+            model, dev = self.strn
+            img_t = image()
+            img_p = self.load_image(max(f - 1, 1))
+            samples = [inputs(s, img_t, img_p, self.load_image(s["rframe"]), det, cur_boxes) for s in states]
+            p, final = predict(model, samples, dev)
+        elif self.verify is not None:
             p, final = self.verify(image(), boxes)
             for _ in range(r.get("iterations", 1) - 1):  # look again at the regressed box
                 p, final = self.verify(image(), final)
@@ -222,12 +236,35 @@ class FCTrack:
                 added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
+        if self.statelog is not None:
+            self.statelog_tracked[f] = cur_boxes.tolist()
+            for i, st in enumerate(states):
+                self.statelog.append({**st, "p": float(p[i]), "decision": decision[i]})
         if self.log:
             for i, (t, prop, used) in enumerate(cands):
                 gap, since_real, obs, cxx, cyy = pre[i]
                 self.attempts.append([f, t.track_id, gap, since_real, obs, used, *map(float, prop), *map(float, final[i]),
                                       float(p[i]), decision[i], cxx, cyy])
         return added
+
+    def state_record(self, f, t, m, prop, used, cur, W):
+        """Exp086: everything STRN needs about one lost-track attempt (images and detections are read separately)."""
+        r = self.rec
+        ref = self.snap.get(t.frame_id, {})
+        c0 = ref.get(t.track_id, prop[:2] + prop[2:] / 2)
+        nb = []
+        if used != "kalman" and t.track_id in ref:
+            ids = list(ref)
+            P0 = np.array([ref[i] for i in ids])
+            avail = np.array([i in cur for i in ids])
+            for j in select_neighbours(P0, ids.index(t.track_id), avail, r["graph"], r["max_neighbours"]):
+                p1 = cur[ids[j]][:2] + cur[ids[j]][2:] / 2
+                nb.append([float(P0[j][0]), float(P0[j][1]), float(p1[0]), float(p1[1])])
+        rb = m.get("rbox", m["box"])
+        return {"frame": f, "track_id": int(t.track_id), "lost_frame": int(t.frame_id), "prop": [float(v) for v in prop],
+                "rbox": [float(v) for v in rb], "rframe": int(m["real"]), "gap": int(f - t.frame_id), "since_real": int(f - m["real"]),
+                "obs": int(m["obs"]), "cov": [float(t.covariance[0, 0]), float(t.covariance[1, 1])], "formation": used != "kalman",
+                "width": int(W), "c0": [float(c0[0]), float(c0[1])], "nb": nb}
 
     def position(self, t, m, est, cur, size):
         """Centre of the missing member under one estimator, with the name of what was used; None when it has no answer."""
