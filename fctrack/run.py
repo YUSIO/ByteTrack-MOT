@@ -17,7 +17,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
-from fctrack.tracker import FCTrack, wrap_stracks  # noqa: E402
+from fctrack.tracker import FCTrack, iou_matrix, wrap_stracks  # noqa: E402
 from homa.evaluate import evaluate  # noqa: E402
 from yolox.tracker.basetrack import BaseTrack  # noqa: E402
 from yolox.tracker.byte_tracker import BYTETracker, STrack  # noqa: E402
@@ -29,6 +29,52 @@ def seq_info(seq_dir):
     ini = configparser.ConfigParser()
     ini.read(seq_dir / "seqinfo.ini")
     return {k: int(ini["Sequence"][k]) for k in ("seqLength", "imHeight", "imWidth", "frameRate")}
+
+
+def slot_guarded(det, prior, slots, cfg):
+    """Exp093: merge the boxes of a track-conditioned detector pass (`prior`) into the plain pass (`det`) at the
+    tracker's member slots only, one box per slot, never lowering anything. Both are n x 5 (x1, y1, x2, y2, score);
+    slots are k x 4 (tlwh) one-step predictions of the tracked and lost tracks.
+
+    A slot that already has a plain box scoring >= `strong` within `radius_sides` slot sides of its centre is explained
+    and claims nothing. Every other slot claims the highest-scoring prior box (score >= `min_score`) within that radius
+    that no other slot has claimed (slots in order of their best candidate's score). The claimed box raises the score of
+    the plain box it overlaps most (IoU >= `merge_iou`; geometry kept) or, when no plain box overlaps it by
+    `free_iou` or more, is added. Boxes no slot claims are left exactly as the plain pass gave them."""
+    if len(prior) == 0 or len(slots) == 0:
+        return det, 0, 0
+    sc = slots[:, :2] + slots[:, 2:] / 2
+    side = np.sqrt(np.maximum(slots[:, 2] * slots[:, 3], 1.0))
+    centre = lambda b: (b[:, :2] + b[:, 2:4]) / 2
+    within = lambda b: np.linalg.norm(centre(b)[None] - sc[:, None], axis=2) <= cfg["radius_sides"] * side[:, None]  # k x n
+    strong = det[det[:, 4] >= cfg["strong"]] if len(det) else det
+    open_ = ~within(strong).any(1) if len(strong) else np.ones(len(slots), bool)
+    prior = prior[prior[:, 4] >= cfg["min_score"]]
+    if len(prior) == 0 or not open_.any():
+        return det, 0, 0
+    cand = within(prior) & open_[:, None]
+    det = det.copy()
+    to_tlwh = lambda b: np.column_stack((b[:, :2], b[:, 2:4] - b[:, :2]))
+    raised = added = 0
+    used, new = set(), []
+    pairs = sorted(((prior[j, 4], i, j) for i, j in zip(*np.nonzero(cand))), reverse=True)
+    done = set()
+    for _, i, j in pairs:
+        if i in done or j in used:
+            continue
+        done.add(i); used.add(j)
+        m = iou_matrix(to_tlwh(prior[j:j + 1]), to_tlwh(det))[0] if len(det) else np.zeros(0)
+        if len(m) and m.max() >= cfg["merge_iou"]:
+            k = int(m.argmax())
+            if prior[j, 4] > det[k, 4]:
+                det[k, 4] = prior[j, 4]
+                raised += 1
+        elif not len(m) or m.max() < cfg["free_iou"]:
+            new.append(prior[j])
+            added += 1
+    if new:
+        det = np.vstack((det, np.array(new, det.dtype)))
+    return det, raised, added
 
 
 ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,prop_w,prop_h,"
@@ -55,6 +101,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         info = seq_info(data / name)
         shape = (info["imHeight"], info["imWidth"])
         raw = np.loadtxt(root / cell["detections"] / name / "det.txt", delimiter=",", ndmin=2)
+        fus = arm.get("fusion")  # Exp093: a second, track-conditioned detection cache merged only at member slots
+        if fus:
+            praw = np.loadtxt(root / cell["fusion_caches"][fus["source"]] / name / "det.txt", delimiter=",", ndmin=2)
         targs = {**cfg["tracker"], **arm.get("tracker", {})}  # per-arm overrides (diagnostics; Exp074 track_buffer / freeze_lost)
         if arm.get("gmc"):  # Exp074: frame-to-frame camera motion estimated beforehand (Exp055 estimator), row `f a b tx c d ty`
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
@@ -62,6 +111,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        fstats = fc.stats
         if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
@@ -69,6 +119,15 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]
             det = np.column_stack((r[:, 2:4], r[:, 2:4] + r[:, 4:6], r[:, 6])).astype(np.float32)
+            if fus:
+                q = praw[praw[:, 0] == frame]
+                prior = np.column_stack((q[:, 2:4], q[:, 2:4] + q[:, 4:6], q[:, 6])).astype(np.float32)
+                pool = [t for t in tracker.tracked_stracks if t.is_activated] + list(tracker.lost_stracks)
+                slots = np.array([np.r_[t.mean[:2] + t.mean[4:6] - np.r_[t.mean[2] * t.mean[3], t.mean[3]] / 2, t.mean[2] * t.mean[3], t.mean[3]]
+                                  for t in pool], float).reshape(-1, 4)  # one-step constant-velocity prediction, tlwh
+                det, nr, na = slot_guarded(det, prior, slots, fus)
+                fstats["raised"] += nr
+                fstats["added"] += na
             cache = []
 
             def image():
