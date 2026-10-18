@@ -54,6 +54,7 @@ class FCTrack:
         self.t, self.STrack, self.verify = tracker, STrack, verify
         self.log, self.attempts = log, []
         self.rec, self.out = cfg.get("recover"), cfg.get("outlier")
+        self.out_box = cfg.get("output_box", "det")  # Exp096: det (default, as before) | kalman | mix:<w>
         self.frame = 0
         self.snap = {}     # frame -> {track id: centre} of the members observed (or recovered) in that frame
         self.meta = {}     # track id -> last real frame, number of real observations, last box, outlier state
@@ -78,6 +79,11 @@ class FCTrack:
         rows, cur = [], {}
         for t in outs:
             box = np.asarray(t._det if t.frame_id == f else t.tlwh, float)
+            if self.rec is None or True:
+                ob = self.out_box
+                if ob != "det" and t.frame_id == f:  # Exp096: write the Kalman-filtered box (upstream ByteTrack output) or a blend with the detector box
+                    w = 1.0 if ob == "kalman" else float(ob.split(":")[1])
+                    box = (1 - w) * box + w * np.asarray(t.tlwh, float)
             rows.append([t.track_id, box, t.score, t])  # the score keeps its dtype so that the written text matches the stored baseline
             if t.frame_id == f:
                 cur[t.track_id] = box
