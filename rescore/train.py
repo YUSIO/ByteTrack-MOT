@@ -1,4 +1,4 @@
-"""Exp094: train the temporal re-scoring network on a candidate table (build.py output), with sequence-level folds.
+"""Exp095 (residual form of Exp094): train the temporal re-scoring network on a candidate table (build.py output), with sequence-level folds.
 
   train.py cv    --table dev.npz --folds 4 --out <dir>              # out-of-fold probabilities for every row
   train.py final --table dev.npz --apply test.npz --out <dir>       # one model on all rows, probabilities for another table
@@ -31,10 +31,12 @@ class Rescorer(nn.Module):
         self.body = nn.Sequential(block(12, c[0], 1), block(c[0], c[1], 2), block(c[1], c[2], 2), block(c[2], c[3], 2))
         self.scal = nn.Sequential(nn.Linear(n_scalar, 64), nn.ReLU(inplace=True))
         self.head = nn.Sequential(nn.Linear(c[3] * 2 + 64, 128), nn.ReLU(inplace=True), nn.Dropout(0.2), nn.Linear(128, 1))
+        nn.init.zeros_(self.head[-1].weight); nn.init.zeros_(self.head[-1].bias)  # starts as the detector score exactly
 
     def forward(self, x, s):
         f = self.body(x)
-        return self.head(torch.cat((f.mean((2, 3)), f.amax((2, 3)), self.scal(s)), 1))[:, 0]
+        delta = self.head(torch.cat((f.mean((2, 3)), f.amax((2, 3)), self.scal(s)), 1))[:, 0]
+        return s[:, 0] + delta  # residual: logit of the detector score (scalar 0, see prep) plus a learned correction
 
 
 def prep(t):

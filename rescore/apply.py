@@ -15,6 +15,7 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--mix", type=float, default=1.0)
     ap.add_argument("--min-score", type=float, default=0.1)
+    ap.add_argument("--band", type=float, nargs=2, default=(0.0, 1.01), help="only rows whose original score is in [lo, hi) are replaced")
     a = ap.parse_args()
     P = np.load(a.pred)
     seq, frame, box, p = P["seq"], P["frame"], P["box"], P["p"]
@@ -27,7 +28,7 @@ def main():
         rows = []
         for r in raw:
             q = key.get((int(r[0]), round(float(r[2]), 3), round(float(r[3]), 3)))
-            sc = r[6] if q is None else a.mix * q + (1 - a.mix) * r[6]
+            sc = r[6] if (q is None or not a.band[0] <= r[6] < a.band[1]) else a.mix * q + (1 - a.mix) * r[6]
             rows.append(f"{int(r[0])},-1,{r[2]:.4f},{r[3]:.4f},{r[4]:.4f},{r[5]:.4f},{sc:.6f},-1,-1,-1\n")
         (a.out / sd.name).mkdir()
         (a.out / sd.name / "det.txt").write_text("".join(rows))
