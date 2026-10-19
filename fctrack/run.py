@@ -107,6 +107,11 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
             (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(
                 ",".join(repr(v) if isinstance(v, float) else str(v) for v in a) + "\n" for a in fc.attempts))
+        if fc.birth_log and attempts_dir is not None:  # Exp115: birth events (with --log-attempts), one csv per sequence
+            bdir = attempts_dir.parent.parent / "births" / attempts_dir.name
+            bdir.mkdir(parents=True, exist_ok=True)
+            (bdir / f"{name}.csv").write_text("frame,score,p,x,y,w,h,id\n" + "".join(
+                "{},{:.5f},{:.6f},{:.2f},{:.2f},{:.2f},{:.2f},{}\n".format(e["frame"], e["score"], e["p"], *e["box"], e["id"]) for e in fc.birth_log))
         for k, v in fc.stats.items():
             stats[k] = stats.get(k, 0) + v
         if claim:

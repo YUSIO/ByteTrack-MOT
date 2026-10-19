@@ -72,6 +72,7 @@ class FCTrack:
         self.head, self.features, self.seq = None, None, None  # Exp108: OnlineHead, Features and sequence name (set by the runner)
         self.bth = cfg.get("birth")      # Exp109: {"lo", "hi", "cover_iou", "rule": all | verifier | oracle, "p_min"}
         self.gt = {}                     # Exp109, rule oracle only (ceiling): frame -> GT tlwh rows (set by the runner)
+        self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -115,6 +116,9 @@ class FCTrack:
                     self.lastw[tid] = (f, c, float(np.sqrt(box[2] * box[3])))
             for old in [x for x in self.hist if x < f - self.relab["gap"] - 1]:
                 del self.hist[old]
+        for e in self.birth_log:  # Exp115: the id a born track carries after this step's relabel
+            if "id" not in e:
+                e["id"] = e["t"].track_id
         if self.head is not None:  # pseudo-labels from the rows actually written in this frame
             written = [r for r in rows if r[1][2] * r[1][3] > 0]
             self.head.collect(f, det, written, lambda b: self.features.at((self.seq, f), image, b), iou_matrix)
@@ -142,6 +146,18 @@ class FCTrack:
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            sel = sel[ok]
+        elif b["rule"] in ("policy", "all_logged"):
+            # Exp115: every uncovered candidate >= lo is scored by the verifier; the written box is the regressed one (as
+            # use_regressed_box). policy: born when a * logit(p) + b * logit(score) + tau >= 0; all_logged: all are born (value collection).
+            pv, reg = self.verify(image(), tlwh[sel])
+            pv = np.asarray(pv, float)
+            final[sel] = np.asarray(reg, float)
+            ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            if b["rule"] == "policy":
+                lg = lambda x: np.log(np.clip(x, 1e-6, 1 - 1e-6) / (1 - np.clip(x, 1e-6, 1 - 1e-6)))
+                ok &= (b["a"] * lg(pv) + b["b"] * lg(det[sel, 4].astype(float)) + b["tau"]) >= 0
+            pmap = {int(k): float(q) for k, q in zip(sel, pv)}
             sel = sel[ok]
         elif b["rule"] == "oracle":
             g = self.gt.get(f, np.zeros((0, 4)))
@@ -178,6 +194,8 @@ class FCTrack:
             self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
             taken = np.vstack((taken, box))
             added.append([t.track_id, box.copy(), det[k, 4], t])
+            if b["rule"] in ("policy", "all_logged"):
+                self.birth_log.append({"frame": f, "score": float(det[k, 4]), "p": pmap[int(k)], "box": box.copy(), "t": t})
             self.stats["born"] += 1
         return added
 
