@@ -136,9 +136,13 @@ class FCTrack:
         if not len(sel):
             return []
         self.stats["birth_candidates"] += len(sel)
+        final = tlwh.copy()
         if b["rule"] == "verifier":
-            p, _ = self.verify(image(), tlwh[sel])
-            sel = sel[np.asarray(p) >= b["p_min"]]
+            p, reg = self.verify(image(), tlwh[sel])
+            if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
+                final[sel] = np.asarray(reg, float)
+            ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            sel = sel[ok]
         elif b["rule"] == "oracle":
             g = self.gt.get(f, np.zeros((0, 4)))
             if len(g) and len(taken):
@@ -154,13 +158,15 @@ class FCTrack:
             sel = sel[[x for x, y in zip(si, gi) if m[x, y] >= 0.5]]
         added = []
         for k in sel[np.argsort(-det[sel, 4])]:
-            box = tlwh[k]
+            box = final[k]
             if len(taken) and iou_matrix(box, taken).max() >= b["cover_iou"]:
                 continue
             same = [t for t in self.t.tracked_stracks if not t.is_activated and t.frame_id == f
-                    and iou_matrix(box, t.tlwh).max() >= 0.7]
+                    and iou_matrix(tlwh[k], t.tlwh).max() >= 0.7]
             if same:
                 t = same[0]
+                if b.get("use_regressed_box"):  # its state starts from the written (regressed) box, as a fill-in re-activation does
+                    t.re_activate(self.STrack(box, det[k, 4]), f, new_id=False)
                 self.stats["birth_from_unconfirmed"] += 1
             else:
                 t = self.STrack(box, det[k, 4])
