@@ -42,7 +42,7 @@ def main():
     root = a.root.resolve()
     cfg = json.loads(a.config.read_text())
     cell, arm = cfg["cells"][a.cell], cfg["arms"][a.arm]
-    dcfg = cfg["detector"]
+    dcfg = cell.get("detector", cfg["detector"])  # a cell may name its own detector (family, weights)
     dev = torch.device(a.device)
     wrap_stracks(STrack)
     verify = None
