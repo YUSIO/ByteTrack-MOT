@@ -70,6 +70,8 @@ class FCTrack:
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
         self.head, self.features, self.seq = None, None, None  # Exp108: OnlineHead, Features and sequence name (set by the runner)
+        self.bth = cfg.get("birth")      # Exp109: {"lo", "hi", "cover_iou", "rule": all | verifier | oracle, "p_min"}
+        self.gt = {}                     # Exp109, rule oracle only (ceiling): frame -> GT tlwh rows (set by the runner)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -97,6 +99,8 @@ class FCTrack:
             self.snap = {f: self.snap[f]}
         if self.head is not None:  # Exp108: claim uncovered weak boxes with the in-sequence head (before relabel, so a claim is a birth)
             rows += self.claim(f, det, rows, image)
+        if self.bth is not None:  # Exp109: immediate birth of uncovered detections decided by a rule (before relabel)
+            rows += self.birth(f, det, rows, image)
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         if self.relab:
@@ -113,6 +117,60 @@ class FCTrack:
             written = [r for r in rows if r[1][2] * r[1][3] > 0]
             self.head.collect(f, det, written, lambda b: self.features.at((self.seq, f), image, b), iou_matrix)
         return [(tid, box, score) for tid, box, score, _ in rows]
+
+    def birth(self, f, det, rows, image):
+        """Exp109: an uncovered detection with score in [lo, hi) becomes a written, activated track in this frame when the
+        rule says so (all: always; verifier: the FCTrack verifier's p >= p_min on the detection box; oracle: it matches at
+        IoU >= 0.5 a GT member no written row matches, ceiling only). A ByteTrack track started on the same box in this
+        frame (unconfirmed, not written) is activated instead of starting a second one. Highest score first."""
+        b = self.bth
+        if not len(det):
+            return []
+        written = [r for r in rows if r[1][2] * r[1][3] > 0]
+        taken = np.array([r[1] for r in written]).reshape(-1, 4)
+        tlwh = np.column_stack((det[:, :2], det[:, 2:4] - det[:, :2])).astype(float)
+        cover = iou_matrix(tlwh, taken).max(1) if len(taken) else np.zeros(len(tlwh))
+        sel = np.flatnonzero((det[:, 4] >= b["lo"]) & (det[:, 4] < b["hi"]) & (cover < b["cover_iou"]))
+        if not len(sel):
+            return []
+        self.stats["birth_candidates"] += len(sel)
+        if b["rule"] == "verifier":
+            p, _ = self.verify(image(), tlwh[sel])
+            sel = sel[np.asarray(p) >= b["p_min"]]
+        elif b["rule"] == "oracle":
+            g = self.gt.get(f, np.zeros((0, 4)))
+            if len(g) and len(taken):
+                from scipy.optimize import linear_sum_assignment
+                m = iou_matrix(g, taken)
+                gi, ti = linear_sum_assignment(-(m * (m >= 0.5)))
+                g = np.delete(g, [x for x, y in zip(gi, ti) if m[x, y] >= 0.5], axis=0)
+            if not len(g):
+                return []
+            from scipy.optimize import linear_sum_assignment
+            m = iou_matrix(tlwh[sel], g)
+            si, gi = linear_sum_assignment(-(m * (m >= 0.5)))
+            sel = sel[[x for x, y in zip(si, gi) if m[x, y] >= 0.5]]
+        added = []
+        for k in sel[np.argsort(-det[sel, 4])]:
+            box = tlwh[k]
+            if len(taken) and iou_matrix(box, taken).max() >= b["cover_iou"]:
+                continue
+            same = [t for t in self.t.tracked_stracks if not t.is_activated and t.frame_id == f
+                    and iou_matrix(box, t.tlwh).max() >= 0.7]
+            if same:
+                t = same[0]
+                self.stats["birth_from_unconfirmed"] += 1
+            else:
+                t = self.STrack(box, det[k, 4])
+                t.activate(self.t.kalman_filter, f)
+                self.t.tracked_stracks.append(t)
+            t.is_activated = True
+            self.meta[t.track_id] = {"obs": 1, "outlier": False, "ok": 0, "cleared": False, "real": f, "box": box.copy()}
+            self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
+            taken = np.vstack((taken, box))
+            added.append([t.track_id, box.copy(), det[k, 4], t])
+            self.stats["born"] += 1
+        return added
 
     def claim(self, f, det, rows, image):
         """Exp108: start an activated, written track on every claimed weak box (one box per place, best first)."""

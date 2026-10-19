@@ -76,6 +76,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        if arm.get("birth", {}).get("rule") == "oracle":  # Exp109 ceiling only: the oracle birth rule reads the GT
+            g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
+            g = g[g[:, 6] >= 1]
+            fc.gt = {int(fr): g[g[:, 0] == fr][:, 2:6] for fr in np.unique(g[:, 0])}
         if claim:
             from fctrack.online_head import OnlineHead
             fc.head, fc.features, fc.seq = OnlineHead(claim, claim["seed"] + int(name[-2:]), glob), features, name
