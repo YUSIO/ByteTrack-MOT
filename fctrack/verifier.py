@@ -67,13 +67,16 @@ def _block(i, o, s):
 
 
 class SeedVerifier(nn.Module):
-    """Outputs (presence logit, dx / side, dy / side, log(w / seed w), log(h / seed h))."""
+    """Outputs (presence logit, dx / side, dy / side, log(w / seed w), log(h / seed h)[, birth logit]).
 
-    def __init__(self):
+    Exp112: with birth=True a sixth output answers, for a detection box used as the seed, whether that box is a correct
+    birth (IoU >= 0.5 with an annotated UAV); the first five outputs keep their fill-in meaning."""
+
+    def __init__(self, birth=False):
         super().__init__()
         c = (32, 64, 128, 192, 256)
         self.body = nn.Sequential(_block(3, c[0], 1), _block(c[0], c[1], 2), _block(c[1], c[2], 2), _block(c[2], c[3], 2), _block(c[3], c[4], 2))
-        self.head = nn.Sequential(nn.Linear(c[4] * 2 + 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.1), nn.Linear(256, 5))
+        self.head = nn.Sequential(nn.Linear(c[4] * 2 + 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.1), nn.Linear(256, 6 if birth else 5))
 
     def forward(self, x, scal):
         f = self.body(x)
@@ -86,14 +89,17 @@ def scalars(side, width):
 
 
 def load(kind, path, device):
-    model = (PaperVerifier(pretrained=False) if kind.startswith("paper") else SeedVerifier()).to(device)
-    model.load_state_dict(torch.load(path, map_location=device))
+    state = torch.load(path, map_location=device)
+    birth = any(k.endswith("head.3.weight") and v.shape[0] == 6 for k, v in state.items())
+    model = (PaperVerifier(pretrained=False) if kind.startswith("paper") else SeedVerifier(birth=birth)).to(device)
+    model.load_state_dict(state)
     return model.eval()
 
 
 @torch.no_grad()
-def verify(kind, model, img, tlwh, device):
-    """tlwh: n x 4 estimated boxes of one image. Returns (p, boxes): presence and the box to keep for each."""
+def verify(kind, model, img, tlwh, device, head=0):
+    """tlwh: n x 4 estimated boxes of one image. Returns (p, boxes): presence and the box to keep for each.
+    head = 5 reads the Exp112 birth output instead of the fill-in presence output (seed kind only)."""
     tlwh = np.asarray(tlwh, float).reshape(-1, 4)
     cx, cy = tlwh[:, 0] + tlwh[:, 2] / 2, tlwh[:, 1] + tlwh[:, 3] / 2
     if kind == "paper":
@@ -107,14 +113,16 @@ def verify(kind, model, img, tlwh, device):
     out = model(x, torch.from_numpy(scalars(side, np.full(len(side), img.shape[1], float))).to(device)).cpu().numpy().astype(float)
     w, h = tlwh[:, 2] * np.exp(out[:, 3]), tlwh[:, 3] * np.exp(out[:, 4])
     ncx, ncy = cx + out[:, 1] * side, cy + out[:, 2] * side
-    return 1 / (1 + np.exp(-out[:, 0])), np.column_stack((ncx - w / 2, ncy - h / 2, w, h))
+    return 1 / (1 + np.exp(-out[:, head])), np.column_stack((ncx - w / 2, ncy - h / 2, w, h))
 
 
 class FrameSamples(Dataset):
     """One item = one annotated frame; returns `per_frame` training samples drawn from it."""
 
-    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0, preload=False):
+    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0, preload=False, birth=None, birth_per_frame=0):
+        """birth (Exp112): {(sequence name, frame): n x 6 array of detection tlwh, label (1 / 0), index of the matched GT}"""
         self.kind, self.per_frame, self.train, self.seed = kind, per_frame, train, seed
+        self.birth, self.birth_per_frame = birth or {}, birth_per_frame
         self.frames, self.images = [], None
         for d in sequences:
             d = Path(d)
@@ -122,7 +130,8 @@ class FrameSamples(Dataset):
             ini = configparser.ConfigParser()
             ini.read(d / "seqinfo.ini")
             for f in np.unique(g[:, 0])[::step]:
-                self.frames.append((str(d / "img1" / f"{int(f):06d}.jpg"), g[g[:, 0] == f][:, 2:6].astype(np.float32), int(ini["Sequence"]["imWidth"])))
+                self.frames.append((str(d / "img1" / f"{int(f):06d}.jpg"), g[g[:, 0] == f][:, 2:6].astype(np.float32), int(ini["Sequence"]["imWidth"]),
+                                    self.birth.get((d.name, int(f)))))
 
         if preload:  # decode every frame once, before the loader forks its workers (they share the memory)
             from concurrent.futures import ThreadPoolExecutor
@@ -133,7 +142,7 @@ class FrameSamples(Dataset):
         return len(self.frames)
 
     def __getitem__(self, i):
-        path, gt, width = self.frames[i]
+        path, gt, width, cands = self.frames[i]
         rng = np.random.default_rng(None if self.train else self.seed * 100003 + i)
         img = self.images[i] if self.images is not None else cv2.imread(path)
         H, W = img.shape[:2]
@@ -142,7 +151,7 @@ class FrameSamples(Dataset):
             return self.paper(img, gt, gc, gs, W, H, rng)
         if self.kind == "paper_resized":
             return self.paper_resized(img, gt, gc, gs, W, H, rng)
-        return self.seeds(img, gt, gc, gs, W, H, rng)
+        return self.seeds(img, gt, gc, gs, W, H, rng, cands)
 
     def paper(self, img, gt, gc, gs, W, H, rng):
         """Equal numbers of UAV crops (centred on an annotated UAV, small jitter) and background crops (no UAV inside)."""
@@ -192,7 +201,7 @@ class FrameSamples(Dataset):
             x = x * rng.uniform(0.85, 1.15, (len(x), 1, 1, 1)).astype(np.float32) + rng.uniform(-0.15, 0.15, (len(x), 1, 1, 1)).astype(np.float32)
         return torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)), torch.tensor(ys, dtype=torch.float32)
 
-    def seeds(self, img, gt, gc, gs, W, H, rng):
+    def seeds(self, img, gt, gc, gs, W, H, rng, cands=None):
         """Seeds around annotated UAVs (within and just outside the search radius) and on the background.
 
         label 1: a UAV centre within R_POS seed sides of the seed centre (target = the nearest one);
@@ -225,4 +234,31 @@ class FrameSamples(Dataset):
             sc.append(scalars(np.array(side), np.array(float(W))))
             lab.append(y)
             tgt.append([-dx if flip else dx, (gc[k, 1] - c[1]) / side, np.log(gt[k, 2] / sw), np.log(gt[k, 3] / sh)])
-        return (torch.from_numpy(np.stack(xs)), torch.from_numpy(np.stack(sc)), torch.tensor(lab, dtype=torch.float32), torch.tensor(np.array(tgt), dtype=torch.float32))
+        blab = [-1.0] * len(xs)  # Exp112: the birth output is not trained on these seeds
+        if self.birth_per_frame and cands is not None and len(cands):
+            # detection boxes of this frame as seeds: half positives, half negatives when both exist
+            pos, neg = np.flatnonzero(cands[:, 4] > 0.5), np.flatnonzero(cands[:, 4] < 0.5)
+            k = self.birth_per_frame
+            n_pos = min(len(pos), k // 2)
+            n_neg = min(len(neg), k - n_pos)
+            n_pos = min(len(pos), k - n_neg)
+            pick = np.r_[rng.permutation(pos)[:n_pos], rng.permutation(neg)[:n_neg]]
+            for q in pick.astype(int):
+                bx = cands[q, :4]
+                c, sw, sh = bx[:2] + bx[2:] / 2, float(bx[2]), float(bx[3])
+                side = float(np.sqrt(sw * sh))
+                flip = bool(self.train and rng.random() < 0.5)
+                x = seed_crop(img, c[0], c[1], side, flip)
+                if self.train:
+                    x = np.clip(x * rng.uniform(0.85, 1.15) + rng.uniform(-0.08, 0.08), 0, 1).astype(np.float32)
+                xs.append(x)
+                sc.append(scalars(np.array(side), np.array(float(W))))
+                y = float(cands[q, 4])
+                lab.append(y if y > 0.5 else -1.0)  # the fill-in output only learns the positives' regression from them
+                blab.append(y)
+                k_ = int(cands[q, 5])
+                dx = (gc[k_, 0] - c[0]) / side if y > 0.5 else 0.0
+                tgt.append([-dx if flip else dx, (gc[k_, 1] - c[1]) / side if y > 0.5 else 0.0,
+                            np.log(gt[k_, 2] / sw) if y > 0.5 else 0.0, np.log(gt[k_, 3] / sh) if y > 0.5 else 0.0])
+        return (torch.from_numpy(np.stack(xs)), torch.from_numpy(np.stack(sc)), torch.tensor(lab, dtype=torch.float32),
+                torch.tensor(np.array(tgt), dtype=torch.float32), torch.tensor(blab, dtype=torch.float32))

@@ -70,6 +70,7 @@ class FCTrack:
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
         self.head, self.features, self.seq = None, None, None  # Exp108: OnlineHead, Features and sequence name (set by the runner)
+        self.verify_birth = None         # Exp112: verify(img, tlwh) on the birth output (set by the runner)
         self.bth = cfg.get("birth")      # Exp109: {"lo", "hi", "cover_iou", "rule": all | verifier | oracle, "p_min"}
         self.gt = {}                     # Exp109, rule oracle only (ceiling): frame -> GT tlwh rows (set by the runner)
 
@@ -137,8 +138,8 @@ class FCTrack:
             return []
         self.stats["birth_candidates"] += len(sel)
         final = tlwh.copy()
-        if b["rule"] == "verifier":
-            p, reg = self.verify(image(), tlwh[sel])
+        if b["rule"] in ("verifier", "verifier_birth"):  # verifier_birth (Exp112): the verifier's birth output
+            p, reg = (self.verify if b["rule"] == "verifier" else self.verify_birth)(image(), tlwh[sel])
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)

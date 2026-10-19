@@ -44,6 +44,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         spec = cell["verifiers"][arm["verifier"]]
         model = load(spec["kind"], root / spec["weights"], torch.device(device))
         verify = lambda img, boxes: apply(spec["kind"], model, img, boxes, torch.device(device))
+        verify_birth = lambda img, boxes: apply(spec["kind"], model, img, boxes, torch.device(device), head=5)
     features, glob, claim = None, None, arm.get("claim")
     if claim:  # Exp108: frozen detector features and (rule `global`) one head fitted on another cell's pseudo-labels
         import torch
@@ -76,6 +77,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        if arm.get("birth", {}).get("rule") == "verifier_birth":
+            fc.verify_birth = verify_birth
         if arm.get("birth", {}).get("rule") == "oracle":  # Exp109 ceiling only: the oracle birth rule reads the GT
             g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
             g = g[g[:, 6] >= 1]
