@@ -119,6 +119,18 @@ class OnlineScoreAdapter:
             for i, j in cells:
                 add[k].append((i, j, 1.0, wgt))
             row_cells.append((k, min(max(int(cy // st), 0), H - 1), min(max(int(cx // st), 0), W - 1)))
+            xr = c.get("xlevel_radius", -1)  # cross-level negatives: the same place on the other FPN levels must not fire
+            if xr >= 0:
+                for j in range(self.L):
+                    if j == k:
+                        continue
+                    Hj, Wj = shapes[j]
+                    ij, jj = min(max(int(cy // strides[j]), 0), Hj - 1), min(max(int(cx // strides[j]), 0), Wj - 1)
+                    for di in range(-xr, xr + 1):
+                        for dj in range(-xr, xr + 1):
+                            if 0 <= ij + di < Hj and 0 <= jj + dj < Wj:
+                                add[j].append((ij + di, jj + dj, 0.0, c.get("w_xlevel", 1.0)))
+                                self.stats["xlevel_neg"] = self.stats.get("xlevel_neg", 0) + 1
             self.pos_cells[k] += len(cells)
             self.stats["pos"] += len(cells)
             self.stats["blind_pos"] += len(cells) if blind else 0
