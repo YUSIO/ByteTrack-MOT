@@ -249,7 +249,10 @@ class FCTrack:
         for t in self.t.lost_stracks:
             m = self.meta.get(t.track_id)
             gap = f - t.frame_id
-            if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"] or m.get("prov", 0) > 0:
+            if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
+                continue
+            if m.get("prov", 0) > 0:  # Exp111: provisional (verifier-born, not yet confirmed again by the detector)
+                self.stats["fill_in_skipped_probation"] += 1
                 continue
             size = m["box"][2:]
             for spec in r["estimator"].split("+"):  # "a+b": both positions are tried, the better verified one is kept
