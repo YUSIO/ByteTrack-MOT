@@ -46,6 +46,7 @@ class OnlineDetector:
         self.buf = [{"x": [], "y": [], "w": []} for _ in range(3)]
         self.frame = 0
         self.rng = np.random.default_rng(c.get("seed", 0))
+        self.pos_cells = [0, 0, 0]  # positive cells seen per level, for the prior correction of the balanced batches
         self.stats = {"updates": 0, "pos": 0, "blind_pos": 0, "hard_neg": 0, "rand_neg": 0}
         self.cache = None
 
@@ -123,6 +124,7 @@ class OnlineDetector:
             wgt = c.get("w_blind", 1.0) if blind else 1.0
             for i, j in cells:
                 add[k].append((i, j, 1.0, wgt))
+            self.pos_cells[k] += len(cells)
             self.stats["pos"] += len(cells)
             self.stats["blind_pos"] += len(cells) if blind else 0
             occupied.append((cx, cy, max(side, 2 * self.strides[k])))
@@ -196,7 +198,10 @@ class OnlineDetector:
                 pi = pos[torch.randint(len(pos), (min(m // 2, max(len(pos), 1)),), device=self.device)]
                 ni = neg[torch.randint(len(neg), (min(m // 2, max(len(neg), 1)),), device=self.device)] if len(neg) else neg
                 idx = torch.cat([pi, ni])
-                logit = x[idx].float() @ self.W[k].T + self.b[k]
+                H, Wd = self.cache["shapes"][k]
+                pi = max(self.pos_cells[k], 1) / (self.frame * H * Wd)  # natural share of positive cells at this level
+                shift = float(np.log((1 - pi) / pi)) if c.get("prior_correction", True) else 0.0  # batches are 50 / 50: logit_balanced = logit_natural + shift
+                logit = x[idx].float() @ self.W[k].T + self.b[k] + shift
                 loss = loss + (F.binary_cross_entropy_with_logits(logit[:, 0], y[idx], weight=w[idx], reduction="sum") / len(idx))
                 n += 1
             if n == 0:
