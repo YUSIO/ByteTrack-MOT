@@ -69,6 +69,7 @@ class FCTrack:
         self.warps = {}                  # frame -> 2x3 camera motion (family gmc only; set by the runner)
         self.hist = {}                   # frame -> {track id: centre} of the rows written in that frame
         self.lastw = {}                  # track id -> (frame, centre, side) of its last written row
+        self.head, self.features, self.seq = None, None, None  # Exp108: OnlineHead, Features and sequence name (set by the runner)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -94,6 +95,8 @@ class FCTrack:
                 del self.snap[old]
         else:
             self.snap = {f: self.snap[f]}
+        if self.head is not None:  # Exp108: claim uncovered weak boxes with the in-sequence head (before relabel, so a claim is a birth)
+            rows += self.claim(f, det, rows, image)
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         if self.relab:
@@ -106,7 +109,32 @@ class FCTrack:
                     self.lastw[tid] = (f, c, float(np.sqrt(box[2] * box[3])))
             for old in [x for x in self.hist if x < f - self.relab["gap"] - 1]:
                 del self.hist[old]
+        if self.head is not None:  # pseudo-labels from the rows actually written in this frame
+            written = [r for r in rows if r[1][2] * r[1][3] > 0]
+            self.head.collect(f, det, written, lambda b: self.features.at((self.seq, f), image, b), iou_matrix)
         return [(tid, box, score) for tid, box, score, _ in rows]
+
+    def claim(self, f, det, rows, image):
+        """Exp108: start an activated, written track on every claimed weak box (one box per place, best first)."""
+        written = [r for r in rows if r[1][2] * r[1][3] > 0]
+        idx, comb = self.head.claims(f, det, written, lambda b: self.features.at((self.seq, f), image, b), image, iou_matrix)
+        taken = np.array([r[1] for r in written]).reshape(-1, 4)
+        added = []
+        for k in idx:
+            box = np.r_[det[k, :2], det[k, 2:4] - det[k, :2]].astype(float)
+            if len(taken) and iou_matrix(box, taken).max() >= self.head.c["cover_iou"]:
+                continue
+            t = self.STrack(box, det[k, 4])
+            t.activate(self.t.kalman_filter, f)
+            t.is_activated = True  # written now, like a member at the first frame; ByteTrack keeps it as a tracked track
+            self.t.tracked_stracks.append(t)
+            self.meta[t.track_id] = {"obs": 1, "outlier": False, "ok": 0, "cleared": False, "real": f, "box": box.copy()}
+            self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
+            taken = np.vstack((taken, box))
+            added.append([t.track_id, box.copy(), det[k, 4], t])
+            self.head.stats["claimed"] += 1
+            self.stats["claimed"] += 1
+        return added
 
     def relabel_births(self, f, rows):
         """Exp077, closed-loop form of Exp076, run on the rows of this frame after the fill-in (as the open-loop pass saw
