@@ -55,7 +55,20 @@ class OnlineScoreAdapter:
             if c.get("lr", 0.0) > 0:
                 adapted = torch.einsum("bchw,c->bhw", feat.float(), self.W[k].detach().to(feat.device)) + self.b[k].detach().to(feat.device)
                 gate = c.get("gate", 0.0)
-                new = torch.where(src.sigmoid() >= gate, adapted, src.float()) if gate > 0 else adapted
+                plausible = src.sigmoid() >= gate if gate > 0 else torch.ones_like(src, dtype=torch.bool)
+                new = torch.where(plausible, adapted, src.float())
+                if c.get("rank_preserve", False):
+                    # rank-preserving recalibration: the plausible cells get the SOURCE logits back, sorted by the adapted logit, so the
+                    # number of cells above any score level is exactly the source's (the tracker's fixed thresholds keep their meaning)
+                    # and only the choice of which cells hold the high scores changes
+                    for b_ in range(new.shape[0]):
+                        m = plausible[b_]
+                        if m.any():
+                            a_, s_ = adapted[b_][m], src[b_].float()[m]
+                            order = torch.argsort(a_)
+                            recal = torch.empty_like(s_)
+                            recal[order] = torch.sort(s_).values
+                            new[b_][m] = recal
                 out = output.clone()
                 out[:, self.channel] = new.to(out.dtype)
                 self.score[k] = new.sigmoid()[0]
