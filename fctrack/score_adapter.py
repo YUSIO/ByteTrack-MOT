@@ -115,10 +115,23 @@ class OnlineScoreAdapter:
             cells = [(i, j) for i in is_ for j in js if abs((j + 0.5) * st - cx) <= rho and abs((i + 0.5) * st - cy) <= rho]
             if not cells:
                 cells = [(min(max(int(cy // st), 0), H - 1), min(max(int(cx // st), 0), W - 1))]
+            if c.get("pos_mode", "center") == "peak" and self.score[k] is not None:
+                # NMS-free heads fire on the cell their one-to-one assignment picks, not necessarily the geometric centre:
+                # the positive is the highest-scoring cell (current scores) of the neighbourhood
+                r2 = max(1.5 * st, 0.5 * side)
+                js2 = np.arange(max(int((cx - r2) // st), 0), min(int((cx + r2) // st) + 1, W))
+                is2 = np.arange(max(int((cy - r2) // st), 0), min(int((cy + r2) // st) + 1, H))
+                sc = self.score[k]
+                best = max(((float(sc[i, j]), i, j) for i in is2 for j in js2), default=None)
+                if best is not None and best[0] > 1e-3:
+                    cells = [(best[1], best[2])]
             wgt = c.get("w_blind", 1.0) if blind else 1.0
             for i, j in cells:
                 add[k].append((i, j, 1.0, wgt))
-            row_cells.append((k, min(max(int(cy // st), 0), H - 1), min(max(int(cx // st), 0), W - 1)))
+            if c.get("pos_mode", "center") == "peak":
+                row_cells.append((k, cells[0][0], cells[0][1]))
+            else:
+                row_cells.append((k, min(max(int(cy // st), 0), H - 1), min(max(int(cx // st), 0), W - 1)))
             xr = c.get("xlevel_radius", -1)  # cross-level negatives: the same place on the other FPN levels must not fire
             if xr >= 0:
                 for j in range(self.L):
