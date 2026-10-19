@@ -54,6 +54,8 @@ def main():
     det = OnlineDetector(root / dcfg["exp_file"], root / dcfg["checkpoint"], dev, adapt=arm.get("online", {"lr": 0.0}))
     data = root / cell["dataset_root"] / cell["split"]
     names = sorted(x.name for x in (data).glob("UAVSwarm-*") if x.is_dir())
+    if cell.get("sequences"):  # optional subset of the split (e.g. the verifier's held-out sequences)
+        names = [n for n in names if n in set(cell["sequences"])]
     names = names[:a.limit] if a.limit else names
     tracks = a.output / "tracks" / a.arm
     tracks.mkdir(parents=True, exist_ok=False)
