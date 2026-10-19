@@ -64,6 +64,10 @@ class OnlineDetector:
             cls_feat, reg_feat = cls_conv(z), reg_conv(z)
             cls_out, reg_out = h.cls_preds[k](cls_feat), h.reg_preds[k](reg_feat)
             obj_logit = F.conv2d(reg_feat, self.W[k].detach().view(1, -1, 1, 1), self.b[k].detach())
+            if self.cfg.get("gate", 0.0) > 0 and self.cfg.get("lr", 0) > 0:  # the adapted objectness only re-ranks cells the source detector already finds plausible
+                src_logit = F.conv2d(reg_feat, self.W0[k].view(1, -1, 1, 1), self.b0[k])
+                plausible = (src_logit.sigmoid() * cls_out.sigmoid()) >= self.cfg["gate"]
+                obj_logit = torch.where(plausible, obj_logit, src_logit)
             outs.append(torch.cat([reg_out, obj_logit.sigmoid(), cls_out.sigmoid()], 1))
             regf.append(reg_feat)
             logits.append((obj_logit, cls_out))
