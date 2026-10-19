@@ -104,7 +104,7 @@ class OnlineScoreAdapter:
         if not centres:
             return
         add = [[] for _ in range(self.L)]
-        occupied = []
+        occupied, row_cells = [], []
         for cx, cy, side, blind in centres:
             k = next((j for j in range(self.L) if side < 4 * strides[j]), self.L - 1)
             st = strides[k]
@@ -118,10 +118,25 @@ class OnlineScoreAdapter:
             wgt = c.get("w_blind", 1.0) if blind else 1.0
             for i, j in cells:
                 add[k].append((i, j, 1.0, wgt))
+            row_cells.append((k, min(max(int(cy // st), 0), H - 1), min(max(int(cx // st), 0), W - 1)))
             self.pos_cells[k] += len(cells)
             self.stats["pos"] += len(cells)
             self.stats["blind_pos"] += len(cells) if blind else 0
             occupied.append((cx, cy, max(side, 2 * st)))
+        # neighbour negatives (NMS-free heads keep one peak per object): the cells around a row's centre cell that are not positives
+        n_nbr = c.get("n_nbr", 0)
+        if n_nbr > 0:
+            R = c.get("nbr_radius", 2)
+            pos_set = [{(a[0], a[1]) for a in add[k] if a[2] > 0.5} for k in range(self.L)]
+            for k, ic, jc in row_cells:
+                H, W = shapes[k]
+                ring = [(ic + di, jc + dj) for di in range(-R, R + 1) for dj in range(-R, R + 1)
+                        if (di or dj) and 0 <= ic + di < H and 0 <= jc + dj < W and (ic + di, jc + dj) not in pos_set[k]]
+                if len(ring) > n_nbr:
+                    ring = [ring[q] for q in self.rng.choice(len(ring), n_nbr, replace=False)]
+                for i, j in ring:
+                    add[k].append((i, j, 0.0, c.get("w_nbr", 1.0)))
+                self.stats["nbr_neg"] = self.stats.get("nbr_neg", 0) + len(ring)
         occ = np.array(occupied)
         away = lambda cx_, cy_: bool(np.all(np.hypot(occ[:, 0] - cx_, occ[:, 1] - cy_) > 1.5 * occ[:, 2]))
         pool = []
