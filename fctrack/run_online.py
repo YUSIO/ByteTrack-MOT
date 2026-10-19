@@ -20,7 +20,7 @@ import torch
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
-from fctrack.online_det import OnlineDetector  # noqa: E402
+from fctrack.detectors import UltralyticsDetector, YoloxDetector  # noqa: E402
 from fctrack.run import KEYS, seq_info  # noqa: E402
 from fctrack.tracker import FCTrack, wrap_stracks  # noqa: E402
 from homa.evaluate import evaluate  # noqa: E402
@@ -51,7 +51,11 @@ def main():
         spec = cell["verifiers"][arm["verifier"]]
         vm = load(spec["kind"], root / spec["weights"], dev)
         verify = lambda img, boxes: apply(spec["kind"], vm, img, boxes, dev)
-    det = OnlineDetector(root / dcfg["exp_file"], root / dcfg["checkpoint"], dev, adapt=arm.get("online", {"lr": 0.0}))
+    adapt = arm.get("online", {"lr": 0.0})
+    if dcfg.get("type", "yolox") == "yolox":
+        det = YoloxDetector(root / dcfg["exp_file"], root / dcfg["checkpoint"], dev, adapt, size=tuple(dcfg.get("size", (1088, 1088))))
+    else:
+        det = UltralyticsDetector(root / dcfg["weights"], dev, adapt, imgsz=dcfg.get("imgsz", 1280))
     data = root / cell["dataset_root"] / cell["split"]
     names = sorted(x.name for x in (data).glob("UAVSwarm-*") if x.is_dir())
     if cell.get("sequences"):  # optional subset of the split (e.g. the verifier's held-out sequences)
@@ -66,7 +70,7 @@ def main():
         tracker = BYTETracker(SimpleNamespace(**cfg["tracker"]), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=False)
-        det.reset()
+        det.begin_sequence()
         det_rows, rows_out, age = [], [], {}
         for frame in range(1, info["seqLength"] + 1):
             img = cv2.imread(str(data / name / "img1" / f"{frame:06d}.jpg"))
@@ -80,7 +84,7 @@ def main():
                     rows_out.append("{},{},{},{},{},{},{},-1,-1,-1\n".format(frame, tid, round(x, 1), round(y, 1), round(w, 1), round(h, 1), round(score, 2)))
                     age[tid] = age.get(tid, 0) + 1
                     written.append((box, age[tid]))
-            det.adapt(written, d)
+            det.update(written, d)
         (tracks / f"{name}.txt").write_text("".join(rows_out))
         if a.dump_det:
             (a.output / "det" / a.arm / name).mkdir(parents=True, exist_ok=True)
