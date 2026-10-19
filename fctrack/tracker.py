@@ -86,6 +86,8 @@ class FCTrack:
                 cur[t.track_id] = box
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
                 m.update(real=f, obs=m["obs"] + 1, box=box)
+                if m.get("prov", 0) > 0 and m["real"] == f and m["obs"] > 1:  # Exp111: a real detection after the birth frame
+                    m["prov"] -= 1
         if self.first_filter and rows:  # the paper's order: outliers are removed before missing members are estimated
             rows = self.hold_back(f, rows, image)
             kept = {r[0] for r in rows}
@@ -165,7 +167,8 @@ class FCTrack:
                 t.activate(self.t.kalman_filter, f)
                 self.t.tracked_stracks.append(t)
             t.is_activated = True
-            self.meta[t.track_id] = {"obs": 1, "outlier": False, "ok": 0, "cleared": False, "real": f, "box": box.copy()}
+            self.meta[t.track_id] = {"obs": 1, "outlier": False, "ok": 0, "cleared": False, "real": f, "box": box.copy(),
+                                     "prov": int(b.get("probation_obs", 0))}  # Exp111: real detections still needed before fill-in may keep it alive
             self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
             taken = np.vstack((taken, box))
             added.append([t.track_id, box.copy(), det[k, 4], t])
@@ -230,7 +233,7 @@ class FCTrack:
             row[0] = L
             if old in self.meta:  # the new track's own bookkeeping continues under the old id
                 m = self.meta.pop(old)
-                self.meta[L] = {**self.meta.get(L, {}), **{k: v for k, v in m.items() if k in ("real", "box")},
+                self.meta[L] = {**self.meta.get(L, {}), **{k: v for k, v in m.items() if k in ("real", "box", "prov")},
                                 "obs": self.meta.get(L, {}).get("obs", 0) + m.get("obs", 0)}
             for snap in self.snap.values():
                 if old in snap:
@@ -246,7 +249,7 @@ class FCTrack:
         for t in self.t.lost_stracks:
             m = self.meta.get(t.track_id)
             gap = f - t.frame_id
-            if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
+            if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"] or m.get("prov", 0) > 0:
                 continue
             size = m["box"][2:]
             for spec in r["estimator"].split("+"):  # "a+b": both positions are tried, the better verified one is kept
