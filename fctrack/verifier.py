@@ -12,7 +12,7 @@ seed    A small network on a crop that covers ZOOM x the box side at a fixed 64 
 Training samples are drawn from annotated training frames only; no detector or tracker output is read.
 
 Exp123: `weaken` = {"p_pos", "p_neg"} weakens a seed's image before it is cropped (fctrack.weaken.apply_op on a local window
-of the frame: blur, down-up, contrast or partial occlusion): a positive seed's target UAV with probability p_pos (label and box
+of the frame; `ops` restricts the operations, default all four: blur, down-up, contrast, partial occlusion): a positive seed's target UAV with probability p_pos (label and box
 target unchanged), a negative seed's queried place with probability p_neg (so that a weakened patch is no evidence by itself).
 """
 import configparser
@@ -228,7 +228,8 @@ class FrameSamples(Dataset):
                 x1, y1 = int(min(W, c[0] + 4 * side + 1)), int(min(H, c[1] + 4 * side + 1))
                 win = img[y0:y1, x0:x1].copy()
                 box = (gc[k, 0] - x0, gc[k, 1] - y0, gt[k, 2], gt[k, 3]) if y > 0.5 else (c[0] - x0, c[1] - y0, side, side)
-                apply_op(win, box, OPS[int(rng.integers(len(OPS)))], rng, np.c_[gc[:, 0] - x0, gc[:, 1] - y0, gt[:, 2:]])
+                ops = wk.get("ops", OPS)
+                apply_op(win, box, ops[int(rng.integers(len(ops)))], rng, np.c_[gc[:, 0] - x0, gc[:, 1] - y0, gt[:, 2:]])
                 x = seed_crop(win, c[0] - x0, c[1] - y0, side, flip)
                 self.n_weak = getattr(self, "n_weak", 0) + 1
             else:
