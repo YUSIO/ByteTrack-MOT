@@ -80,6 +80,22 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
             g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
             g = g[g[:, 6] >= 1]
             fc.gt = {int(fr): g[g[:, 0] == fr][:, 2:6] for fr in np.unique(g[:, 0])}
+        if arm.get("verifier_oracle"):  # Exp123 ceiling only: the verifier's decision is replaced by the GT (its regressed box is kept)
+            from fctrack.tracker import iou_matrix
+            g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
+            g = g[g[:, 6] >= 1]
+            gtd = {int(fr): g[g[:, 0] == fr][:, 2:6] for fr in np.unique(g[:, 0])}
+
+            def oracle(img, boxes, fc=fc, gtd=gtd):
+                _, reg = verify(img, boxes)
+                reg = np.asarray(reg, float).reshape(-1, 4)
+                gg = gtd.get(fc.frame, np.zeros((0, 4)))
+                hit = iou_matrix(reg, gg).max(1) >= 0.5 if len(gg) and len(reg) else np.zeros(len(reg), bool)
+                return hit.astype(float), reg
+            vo = arm["verifier_oracle"]
+            fc.verify_birth = oracle if vo.get("birth") else verify
+            if vo.get("fill"):
+                fc.verify = oracle
         if claim:
             from fctrack.online_head import OnlineHead
             fc.head, fc.features, fc.seq = OnlineHead(claim, claim["seed"] + int(name[-2:]), glob), features, name

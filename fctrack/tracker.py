@@ -73,6 +73,7 @@ class FCTrack:
         self.bth = cfg.get("birth")      # Exp109: {"lo", "hi", "cover_iou", "rule": all | verifier | oracle, "p_min"}
         self.gt = {}                     # Exp109, rule oracle only (ceiling): frame -> GT tlwh rows (set by the runner)
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
+        self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -142,7 +143,7 @@ class FCTrack:
         self.stats["birth_candidates"] += len(sel)
         final = tlwh.copy()
         if b["rule"] == "verifier":
-            p, reg = self.verify(image(), tlwh[sel])
+            p, reg = (self.verify_birth or self.verify)(image(), tlwh[sel])
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
@@ -150,7 +151,7 @@ class FCTrack:
         elif b["rule"] in ("policy", "all_logged"):
             # Exp115: every uncovered candidate >= lo is scored by the verifier; the written box is the regressed one (as
             # use_regressed_box). policy: born when a * logit(p) + b * logit(score) + tau >= 0; all_logged: all are born (value collection).
-            pv, reg = self.verify(image(), tlwh[sel])
+            pv, reg = (self.verify_birth or self.verify)(image(), tlwh[sel])
             pv = np.asarray(pv, float)
             final[sel] = np.asarray(reg, float)
             ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
