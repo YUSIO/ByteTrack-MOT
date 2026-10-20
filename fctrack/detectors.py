@@ -116,7 +116,7 @@ class PriorYoloxDetector:
         base.load_state_dict(ck["model"])
         inj = None
         if ck.get("inj") is not None:
-            inj = PriorInjection(ck["channels"], prior_channels=2)
+            inj = PriorInjection(ck["channels"], prior_channels=2, bound=ck.get("bound"))
             inj.load_state_dict(ck["inj"])
         self.model = PriorYOLOX(base, inj).to(device).eval()
         self.exp, self.device, self.size, self.conf, self.nms = exp, device, tuple(size), conf, nms

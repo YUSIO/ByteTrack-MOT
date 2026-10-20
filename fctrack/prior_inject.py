@@ -5,6 +5,9 @@ heatmap at stride 8 (max-pooled to the level's resolution), phi_k is a small con
 the embedding (so the injection depends on what the image shows at the slot), and M_k = max-pooled max of the prior
 channels: the features change only where a slot is, never on the rest of the image. The last convolution of phi_k starts
 at zero, so the untrained module is the original detector. Only the channel counts of the FPN levels are needed.
+
+Exp122: with `bound` b the residual is b * tanh(phi_k / b), so no feature moves by more than b (Exp120: the unbounded residual
+reached about twice the feature range at stride 32, the regression's log-size output overflowed and the gradients became NaN).
 """
 import torch
 import torch.nn as nn
@@ -12,8 +15,9 @@ import torch.nn.functional as F
 
 
 class PriorInjection(nn.Module):
-    def __init__(self, channels, prior_channels=2, emb=32, hidden=64):
+    def __init__(self, channels, prior_channels=2, emb=32, hidden=64, bound=None):
         super().__init__()
+        self.bound = bound
         self.enc = nn.Sequential(nn.Conv2d(prior_channels, emb, 3, padding=1), nn.SiLU(), nn.Conv2d(emb, emb, 3, padding=1), nn.SiLU())
         self.fuse = nn.ModuleList(nn.Sequential(nn.Conv2d(c + emb, hidden, 1), nn.SiLU(), nn.Conv2d(hidden, hidden, 3, padding=1), nn.SiLU(),
                                                 nn.Conv2d(hidden, c, 1)) for c in channels)
@@ -30,7 +34,10 @@ class PriorInjection(nn.Module):
             hw = f.shape[-2:]
             ek = e if e.shape[-2:] == hw else F.adaptive_max_pool2d(e, hw)
             mk = m if m.shape[-2:] == hw else F.adaptive_max_pool2d(m, hw)
-            out.append(f + mk * self.fuse[k](torch.cat([f, ek], 1)))
+            r = self.fuse[k](torch.cat([f, ek], 1))
+            if self.bound:
+                r = self.bound * torch.tanh(r / self.bound)
+            out.append(f + mk * r)
         return out
 
 

@@ -118,6 +118,8 @@ def weaken(img, slots, gt_tlwh, cfg, rng, order):
         if stats["neg_lost"] + stats["neg_bg"] >= n_neg:
             break
         s = float(rng.choice(sides))
+        if W - s <= s or H - s <= s:  # image smaller than two sides: no background place (Exp121 failed here)
+            continue
         cx, cy = rng.uniform(s, W - s), rng.uniform(s, H - s)
         if len(gc) and np.min(np.hypot(gc[:, 0] - cx, gc[:, 1] - cy)) <= 2.0 * s:
             continue

@@ -5,6 +5,10 @@ Each item is one frame: the letterboxed image, its ground-truth boxes, and the h
 that frame (fctrack.slot_prior.render). Augmentation: horizontal flip (image, boxes and slots together). Loss = head loss
 with the prior + head loss without it (so the no-prior path stays a detector); --no-inject trains the same detector the
 same way without the module (the control for "one more round of training"). BatchNorm statistics stay frozen.
+Exp122: --freeze-detector trains only the injection (the detector's weights never change, so the no-prior path is the
+original detector), with loss = head loss with the prior; --bound limits the residual. Every step checks the loss and the
+gradients: a non-finite step is skipped and counted, and training stops (exit 3) when more than 1 % of the steps after the
+first 200 were skipped or the fp16 gradient scale falls below 1.
 
 Usage (code root on PYTHONPATH):
   python fctrack/train_prior.py -f <exp file> -c <ckpt> --data <data.json> --prior-config <prior.json> --output <dir> [--no-inject]
@@ -113,6 +117,8 @@ def main():
     ap.add_argument("--prior-config", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--no-inject", action="store_true")
+    ap.add_argument("--freeze-detector", action="store_true", help="Exp122: train the injection only")
+    ap.add_argument("--bound", type=float, default=None, help="Exp122: bound of the injection residual")
     ap.add_argument("--weaken", type=Path, default=None, help="Exp121: json of the weakening augmentation (fctrack.weaken)")
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--batch", type=int, default=4)
@@ -136,12 +142,16 @@ def main():
     base.to(dev)
     with torch.no_grad():
         chans = [f.shape[1] for f in base.backbone(torch.zeros(1, 3, *size, device=dev))]
-    inj = None if a.no_inject else PriorInjection(chans, prior_channels=2).to(dev)
+    inj = None if a.no_inject else PriorInjection(chans, prior_channels=2, bound=a.bound).to(dev)
+    if a.freeze_detector:
+        assert inj is not None
+        for q in base.parameters():
+            q.requires_grad_(False)
     model = PriorYOLOX(base, inj)
     prior_cfg = json.loads(a.prior_config.read_text())
     weaken_cfg = json.loads(a.weaken.read_text()) if a.weaken else None
     ds = SlotFrames(json.loads(a.data.read_text()), prior_cfg, size, seed=a.seed, weaken_cfg=weaken_cfg)
-    groups = [{"params": list(base.backbone.parameters()), "lr": a.lr_backbone}, {"params": list(base.head.parameters()), "lr": a.lr_head}]
+    groups = [] if a.freeze_detector else [{"params": list(base.backbone.parameters()), "lr": a.lr_backbone}, {"params": list(base.head.parameters()), "lr": a.lr_head}]
     if inj is not None:
         groups.append({"params": list(inj.parameters()), "lr": a.lr_inject})
     opt = torch.optim.AdamW(groups, weight_decay=a.weight_decay)
@@ -154,7 +164,8 @@ def main():
             "trainable_parameters": {"detector": sum(p.numel() for p in base.parameters()), "inject": sum(p.numel() for p in inj.parameters()) if inj else 0}}
     (a.output / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps(meta), flush=True)
-    step, started = 0, time.time()
+    step, started, skipped = 0, time.time(), 0
+    params = [q for q in model.parameters() if q.requires_grad]
     for epoch in range(a.epochs):
         ds.set_epoch(epoch)
         loader = torch.utils.data.DataLoader(ds, batch_size=a.batch, shuffle=True, num_workers=a.workers, drop_last=True,
@@ -164,13 +175,26 @@ def main():
         for x, prior, lab, wk in loader:
             x, prior, lab = x.to(dev, non_blocking=True), prior.to(dev, non_blocking=True), lab.to(dev, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=a.amp):
-                out = model.losses(x, lab, prior if inj is not None else None)
+                if a.freeze_detector:  # the detector is a fixed function: only the injection and its effect through the head are differentiated
+                    with torch.no_grad():
+                        f = list(base.backbone(x))
+                    out = {"prior": base.head(inj(f, prior), lab, x)}
+                else:
+                    out = model.losses(x, lab, prior if inj is not None else None)
             loss = sum(v[0] for v in out.values())
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            finite = bool(torch.isfinite(loss)) and all(bool(torch.isfinite(q.grad).all()) for q in params if q.grad is not None)
+            if finite:
+                torch.nn.utils.clip_grad_norm_(params, 10.0)
+            else:
+                skipped += 1
             scaler.step(opt); scaler.update(); sched.step(); step += 1; iters += 1
+            if step > 200 and (skipped > 0.01 * step or (a.amp and scaler.get_scale() < 1.0)):
+                print(json.dumps({"abort": "non-finite steps", "step": step, "skipped": skipped, "grad_scale": scaler.get_scale()}), flush=True)
+                tb.close(); log.close()
+                raise SystemExit(3)
             vals = {"total": float(loss.detach()), "prior_share": float((prior.amax((1, 2, 3)) > 0).float().mean()),
                     "weaken/pos": float(wk[:, 0].sum()), "weaken/neg_lost": float(wk[:, 1].sum()), "weaken/neg_bg": float(wk[:, 2].sum())}
             for path, (tot, iou_l, conf_l, cls_l, l1_l, nfg) in out.items():
@@ -183,20 +207,23 @@ def main():
                 for gi, g in enumerate(opt.param_groups):
                     tb.add_scalar(f"lr/group{gi}", g["lr"], step)
                 if inj is not None:
-                    tb.add_scalar("inject/last_weight_norm", float(sum(f[-1].weight.norm() for f in inj.fuse)), step)
+                    tb.add_scalar("inject/last_weight_norm", float(sum(m_[-1].weight.norm() for m_ in inj.fuse)), step)
+                tb.add_scalar("train/skipped_steps", skipped, step)
+                tb.add_scalar("train/grad_scale", scaler.get_scale() if a.amp else 1.0, step)
             if a.limit_iters and step >= a.limit_iters:
                 break
         n = max(1, iters)
-        rec = {"epoch": epoch + 1, "step": step, "seconds": round(time.time() - started, 1), **{k: v / n for k, v in sums.items()}}
+        rec = {"epoch": epoch + 1, "step": step, "seconds": round(time.time() - started, 1), "skipped_steps": skipped,
+               "grad_scale": scaler.get_scale() if a.amp else 1.0, **{k: v / n for k, v in sums.items()}}
         for k, v in rec.items():
-            if k not in ("epoch", "step", "seconds"):
+            if k not in ("epoch", "step", "seconds", "skipped_steps", "grad_scale"):
                 tb.add_scalar(f"epoch/{k}", v, epoch + 1)
         log.write(json.dumps(rec) + "\n"); log.flush()
         print(json.dumps(rec), flush=True)
         if a.limit_iters and step >= a.limit_iters:
             break
     torch.save({"model": base.state_dict(), "inj": inj.state_dict() if inj is not None else None, "channels": chans, "prior": prior_cfg,
-                "epoch": epoch + 1}, a.output / "last.pt")
+                "bound": a.bound, "frozen_detector": a.freeze_detector, "skipped_steps": skipped, "epoch": epoch + 1}, a.output / "last.pt")
     tb.close(); log.close()
     print("Training of the slot-prior detector is done", flush=True)
 
