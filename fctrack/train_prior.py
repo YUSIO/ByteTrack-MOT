@@ -139,7 +139,7 @@ def main():
     base.load_state_dict(torch.load(a.ckpt, map_location="cpu", weights_only=False)["model"])
     base.head.use_l1 = True  # as in the last epochs of the original training (no-augmentation stage)
     size = tuple(exp.input_size)
-    base.to(dev)
+    base.to(dev).eval()  # Exp122 fix: the channel probe below ran in train mode before and moved every BatchNorm's running statistics once
     with torch.no_grad():
         chans = [f.shape[1] for f in base.backbone(torch.zeros(1, 3, *size, device=dev))]
     inj = None if a.no_inject else PriorInjection(chans, prior_channels=2, bound=a.bound).to(dev)
