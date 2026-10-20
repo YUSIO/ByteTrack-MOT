@@ -75,6 +75,10 @@ def main():
         for frame in range(1, info["seqLength"] + 1):
             img = cv2.imread(str(data / name / "img1" / f"{frame:06d}.jpg"))
             d = det.detect(img)
+            if adapt.get("score_shift"):  # Exp119 control: a global logit shift of every detection score, no learning
+                sc = np.clip(d[:, 4].astype(np.float64), 1e-6, 1 - 1e-6)
+                d = d.copy()
+                d[:, 4] = np.round(1 / (1 + np.exp(-(np.log(sc / (1 - sc)) - adapt["score_shift"]))), 6).astype(np.float32)
             if a.dump_det:
                 det_rows += ["{},-1,{:.4f},{:.4f},{:.4f},{:.4f},{:.6f},-1,-1,-1\n".format(frame, x1, y1, x2 - x1, y2 - y1, s) for x1, y1, x2, y2, s in d]
             written = []
