@@ -97,3 +97,49 @@ class UltralyticsDetector:
 
     def update(self, rows, dets):
         self.adapter.update(rows, dets, self.geo)
+
+
+class PriorYoloxDetector:
+    """Exp120: YOLOX with the slot prior injected into its FPN features (fctrack.prior_inject).
+
+    weights: a train_prior.py checkpoint ({"model": full YOLOX state, "inj": injection state or None, "prior": render cfg}).
+    use_prior False runs the same weights without the prior (the no-prior path). The runner sets `self.slots` (the slots of
+    the frame, fctrack.slot_prior.SlotPrior.slots) before every detect(); the score adapter is not used."""
+    wants_slots = True
+
+    def __init__(self, exp_file, weights, device, size=(1088, 1088), conf=0.001, nms=0.7, use_prior=True):
+        from yolox.exp import get_exp
+        from fctrack.prior_inject import PriorInjection, PriorYOLOX
+        exp = get_exp(str(exp_file), None)
+        ck = torch.load(weights, map_location="cpu", weights_only=False)
+        base = exp.get_model()
+        base.load_state_dict(ck["model"])
+        inj = None
+        if ck.get("inj") is not None:
+            inj = PriorInjection(ck["channels"], prior_channels=2)
+            inj.load_state_dict(ck["inj"])
+        self.model = PriorYOLOX(base, inj).to(device).eval()
+        self.exp, self.device, self.size, self.conf, self.nms = exp, device, tuple(size), conf, nms
+        self.prior_cfg, self.use_prior = ck.get("prior"), bool(use_prior) and inj is not None
+        self.slots, self.stats = [], {}
+
+    def begin_sequence(self):
+        self.slots = []
+
+    @torch.no_grad()
+    def detect(self, img):
+        from yolox.data.data_augment import preproc
+        from yolox.utils import postprocess
+        from fctrack.slot_prior import render
+        x, r = preproc(img, self.size, MEAN, STD)
+        prior = None
+        if self.use_prior:
+            prior = torch.from_numpy(render(self.slots, self.prior_cfg, r, self.size)).unsqueeze(0).to(self.device)
+        out = postprocess(self.model(torch.from_numpy(x).unsqueeze(0).to(self.device), prior), self.exp.num_classes, self.conf, self.nms)[0]
+        if out is None:
+            return np.zeros((0, 5), np.float32)
+        o = out.cpu().numpy()
+        return _cache_round(o[:, :4] / r, o[:, 4] * o[:, 5])
+
+    def update(self, rows, dets):
+        pass
