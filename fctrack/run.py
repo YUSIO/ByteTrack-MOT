@@ -45,6 +45,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         model = load(spec["kind"], root / spec["weights"], torch.device(device))
         verify = lambda img, boxes: apply(spec["kind"], model, img, boxes, torch.device(device))
     features, glob, claim = None, None, arm.get("claim")
+    readout = None
     if claim:  # Exp108: frozen detector features and (rule `global`) one head fitted on another cell's pseudo-labels
         import torch
         from fctrack.online_head import Features
@@ -109,6 +110,13 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
                 return f
             base_fill, base_birth = fc.verify, fc.verify_birth or fc.verify
             fc.verify, fc.verify_birth, fc.log_birth_low = logged("fill", base_fill), logged("birth", base_birth), logged("birth_low", base_birth)
+        if arm.get("readout"):  # Exp130: the read-out head decides the fill-in (verify stays for births, if any)
+            if readout is None:
+                from fctrack.readout import Readout
+                spec = cell["readouts"][arm["readout"]]
+                readout = Readout(root / spec["fairmot"], root / spec["backbone"], root / spec["head"], device, spec.get("use_template", True))
+            readout.begin(data / name)
+            fc.readout = readout
         if claim:
             from fctrack.online_head import OnlineHead
             fc.head, fc.features, fc.seq = OnlineHead(claim, claim["seed"] + int(name[-2:]), glob), features, name

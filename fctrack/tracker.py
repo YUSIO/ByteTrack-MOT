@@ -75,6 +75,7 @@ class FCTrack:
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
         self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
         self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
+        self.readout = None              # Exp130: callable(frame, tlwh, templates) -> (p, tlwh) used for the fill-in instead of verify
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -88,7 +89,7 @@ class FCTrack:
             if t.frame_id == f:
                 cur[t.track_id] = box
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
-                m.update(real=f, obs=m["obs"] + 1, box=box)
+                m.update(real=f, obs=m["obs"] + 1, box=box, real_box=box)
                 if m.get("prov", 0) > 0 and m["real"] == f and m["obs"] > 1:  # Exp111: a real detection after the birth frame
                     m["prov"] -= 1
         if self.first_filter and rows:  # the paper's order: outliers are removed before missing members are estimated
@@ -305,7 +306,11 @@ class FCTrack:
         self.stats["tried"] += len(cands)
         if not cands:
             return []
-        if self.verify is not None:
+        if self.readout is not None:  # Exp130: read-out head on the detector's features; template = last real detection
+            p, final = self.readout(f, boxes, [(self.meta[t.track_id]["real"], self.meta[t.track_id]["real_box"]) for t, _, _ in cands])
+            if not r["use_regressed_box"]:
+                final = boxes
+        elif self.verify is not None:
             p, final = self.verify(image(), boxes)
             for _ in range(r.get("iterations", 1) - 1):  # look again at the regressed box
                 p, final = self.verify(image(), final)
