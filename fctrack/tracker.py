@@ -74,6 +74,7 @@ class FCTrack:
         self.gt = {}                     # Exp109, rule oracle only (ceiling): frame -> GT tlwh rows (set by the runner)
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
         self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
+        self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -138,6 +139,10 @@ class FCTrack:
         tlwh = np.column_stack((det[:, :2], det[:, 2:4] - det[:, :2])).astype(float)
         cover = iou_matrix(tlwh, taken).max(1) if len(taken) else np.zeros(len(tlwh))
         sel = np.flatnonzero((det[:, 4] >= b["lo"]) & (det[:, 4] < b["hi"]) & (cover < b["cover_iou"]))
+        if self.log_birth_low is not None and b.get("log_lo") is not None:  # Exp124: record the lower band, decide nothing
+            low = np.flatnonzero((det[:, 4] >= b["log_lo"]) & (det[:, 4] < b["lo"]) & (cover < b["cover_iou"]))
+            if len(low):
+                self.log_birth_low(image(), tlwh[low])
         if not len(sel):
             return []
         self.stats["birth_candidates"] += len(sel)

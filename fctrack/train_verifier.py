@@ -4,6 +4,8 @@ resized to 224 x 128; seed: scale-normalised crop with box regression).
 Reads annotated training frames only. Sequences named in `held_out` are used for validation, never for fitting.
 Exp123: the `weaken` block of the training config switches on the weakening of the seeds (fctrack.verifier.FrameSamples); the
 held-out validation is then run twice, on clean and on weakened seeds (fixed per frame). TensorBoard events in <output>/tb.
+Exp124: --queries adds real verifier queries (QuerySamples, repeated --query-repeat times per epoch) to the synthetic seeds;
+--val-queries is validated every epoch as well; --arch resnet18 uses the CIFAR-style ResNet18 (fctrack.verifier.ResNetVerifier).
 """
 import argparse
 import json
@@ -16,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from fctrack.verifier import FrameSamples, PaperVerifier, SeedVerifier
+from fctrack.verifier import FrameSamples, PaperVerifier, QuerySamples, ResNetVerifier, SeedVerifier
 
 
 def collate(batch):
@@ -72,6 +74,10 @@ def main():
     ap.add_argument("--data", required=True, help="key of the training set in the config")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--arch", choices=("cnn", "resnet18"), default="cnn")
+    ap.add_argument("--queries", type=Path, default=None)
+    ap.add_argument("--val-queries", type=Path, default=None)
+    ap.add_argument("--query-repeat", type=int, default=1)
     a = ap.parse_args()
     cfg = json.loads(a.config.read_text())
     tr, data = cfg["train"][a.kind], cfg["train_data"][a.data]
@@ -92,12 +98,20 @@ def main():
     info = {"kind": a.kind, "data": a.data, "fit_sequences": [d.name for d in fit], "held_out_sequences": [d.name for d in val],
             "fit_frames": len(train_set), "held_out_frames": len(val_set) if val_set else 0, "device": a.device, "torch": torch.__version__}
     print(json.dumps(info), flush=True)
+    if a.queries is not None:
+        qset = QuerySamples(a.queries, True, repeat=a.query_repeat)
+        info["query_frames_per_epoch"] = len(qset)
+        train_set = torch.utils.data.ConcatDataset([train_set, qset])
     loader = DataLoader(train_set, batch_size=tr["frames_per_batch"], shuffle=True, num_workers=tr["workers"], collate_fn=collate, drop_last=True, persistent_workers=True)
+    vqloader = DataLoader(QuerySamples(a.val_queries, False, seed=tr["seed"]), batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"],
+                          collate_fn=collate) if a.val_queries is not None else None
     vloader = DataLoader(val_set, batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"], collate_fn=collate) if val_set else None
     vwloader = DataLoader(vw_set, batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"], collate_fn=collate) if vw_set else None
     from torch.utils.tensorboard import SummaryWriter
     tb = SummaryWriter(a.output / "tb")
-    model = (PaperVerifier(pretrained=tr.get("pretrained", True)) if a.kind.startswith("paper") else SeedVerifier()).to(a.device)
+    model = (PaperVerifier(pretrained=tr.get("pretrained", True)) if a.kind.startswith("paper") else
+             ResNetVerifier(pretrained=True) if a.arch == "resnet18" else SeedVerifier()).to(a.device)
+    info["parameters"] = sum(q.numel() for q in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=tr["lr"], weight_decay=tr["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, tr["lr"], total_steps=tr["epochs"] * len(loader), pct_start=0.1)
     log, t0 = [], time.time()
@@ -128,9 +142,12 @@ def main():
         if vloader is not None:
             rec.update(validate(a.kind, model, vloader, a.device))
             rec.update({"weak_" + k: v for k, v in validate(a.kind, model, vwloader, a.device).items()})
+        if vqloader is not None:
+            rec.update({"realq_" + k: v for k, v in validate(a.kind, model, vqloader, a.device).items()})
         for k, v in rec.items():
             if k not in ("epoch", "seconds") and isinstance(v, (int, float)):
-                tb.add_scalar(("val_weak/" + k[5:]) if k.startswith("weak_") else ("val/" + k if k != "train_loss" else "train/epoch_loss"), v, ep + 1)
+                tb.add_scalar(("val_weak/" + k[5:]) if k.startswith("weak_") else ("val_realq/" + k[6:]) if k.startswith("realq_") else
+                              ("val/" + k if k != "train_loss" else "train/epoch_loss"), v, ep + 1)
         log.append(rec)
         print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in rec.items()}), flush=True)
         torch.save(model.state_dict(), a.output / "last.pt")

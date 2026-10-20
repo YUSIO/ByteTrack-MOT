@@ -84,13 +84,33 @@ class SeedVerifier(nn.Module):
         return self.head(torch.cat((f.mean((2, 3)), f.amax((2, 3)), scal), 1))
 
 
+class ResNetVerifier(nn.Module):
+    """Exp124: the seed verifier's input and outputs on a CIFAR-style ResNet18 (3 x 3 stride-1 stem, no max pooling, so a
+    64 x 64 crop ends at 8 x 8); the residual stages start from ImageNet weights, the stem and the head are new."""
+
+    def __init__(self, pretrained=True):
+        super().__init__()
+        import torchvision
+        r = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+        r.conv1 = nn.Conv2d(3, 64, 3, 1, 1, bias=False)
+        r.maxpool = nn.Identity()
+        self.body = nn.Sequential(r.conv1, r.bn1, r.relu, r.layer1, r.layer2, r.layer3, r.layer4)
+        self.head = nn.Sequential(nn.Linear(512 * 2 + 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.1), nn.Linear(256, 5))
+        self.register_buffer("mean", torch.tensor(MEAN).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor(STD).view(1, 3, 1, 1))
+
+    def forward(self, x, scal):
+        f = self.body((x - self.mean) / self.std)
+        return self.head(torch.cat((f.mean((2, 3)), f.amax((2, 3)), scal), 1))
+
+
 def scalars(side, width):
     """Absolute scale cues that the scale-normalised crop removes."""
     return np.stack((np.log(side / 20.0), np.log(width / 1000.0)), -1).astype(np.float32)
 
 
 def load(kind, path, device):
-    model = (PaperVerifier(pretrained=False) if kind.startswith("paper") else SeedVerifier()).to(device)
+    model = (PaperVerifier(pretrained=False) if kind.startswith("paper") else ResNetVerifier(pretrained=False) if kind == "seed_resnet" else SeedVerifier()).to(device)
     model.load_state_dict(torch.load(path, map_location=device))
     return model.eval()
 
@@ -241,4 +261,37 @@ class FrameSamples(Dataset):
             sc.append(scalars(np.array(side), np.array(float(W))))
             lab.append(y)
             tgt.append([-dx if flip else dx, (gc[k, 1] - c[1]) / side, np.log(gt[k, 2] / sw), np.log(gt[k, 3] / sh)])
+        return (torch.from_numpy(np.stack(xs)), torch.from_numpy(np.stack(sc)), torch.tensor(lab, dtype=torch.float32), torch.tensor(np.array(tgt), dtype=torch.float32))
+
+
+class QuerySamples(Dataset):
+    """Exp124: real verifier queries (labelled by label_queries.py). One item = all queries of one frame:
+    crops as the verifier sees them (seed_crop at the query box), scalars, label (1 / 0 / -1 ignored) and box target.
+    Training adds a horizontal flip and a brightness change (the same as the synthetic seeds), nothing else."""
+
+    def __init__(self, csv_path, train, repeat=1, seed=0):
+        import csv
+        self.train, self.seed, groups = train, seed, {}
+        for r in csv.DictReader(open(csv_path)):
+            groups.setdefault((r["image"], int(r["width"])), []).append(
+                (float(r["cx"]), float(r["cy"]), float(r["side"]), float(r["label"]), [float(r[k]) for k in ("dx", "dy", "lw", "lh")]))
+        self.items = list(groups.items()) * max(1, int(repeat))
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        (path, width), qs = self.items[i]
+        rng = np.random.default_rng(None if self.train else self.seed * 100003 + i)
+        img = cv2.imread(path)
+        xs, sc, lab, tgt = [], [], [], []
+        for cx, cy, side, y, t in qs:
+            flip = bool(self.train and rng.random() < 0.5)
+            x = seed_crop(img, cx, cy, side, flip)
+            if self.train:
+                x = np.clip(x * rng.uniform(0.85, 1.15) + rng.uniform(-0.08, 0.08), 0, 1).astype(np.float32)
+            xs.append(x)
+            sc.append(scalars(np.array(side), np.array(float(width))))
+            lab.append(y)
+            tgt.append([-t[0] if flip else t[0], t[1], t[2], t[3]])
         return (torch.from_numpy(np.stack(xs)), torch.from_numpy(np.stack(sc)), torch.tensor(lab, dtype=torch.float32), torch.tensor(np.array(tgt), dtype=torch.float32))

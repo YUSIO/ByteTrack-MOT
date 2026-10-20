@@ -35,7 +35,7 @@ ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,pr
                    "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y")
 
 
-def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
+def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, queries_dir=None):
     wrap_stracks(STrack)
     verify = None
     if arm.get("verifier"):
@@ -60,6 +60,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
             glob = LogisticRegression(C=claim["C"], class_weight=claim["class_weight"], max_iter=claim["max_iter"]).fit(X[keep], (kinds[keep] == "1").astype(int))
     data = root / cell["dataset_root"] / cell["split"]
     names = sorted(x.name for x in (root / cell["detections"]).glob("UAVSwarm-*") if x.is_dir())
+    if cell.get("sequences"):  # Exp124: a subset of the cell's sequences
+        names = [n for n in names if n in set(cell["sequences"])]
     names = names[:limit] if limit else names
     tracks.mkdir(parents=True, exist_ok=False)
     if attempts_dir is not None:
@@ -96,6 +98,17 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
             fc.verify_birth = oracle if vo.get("birth") else verify
             if vo.get("fill"):
                 fc.verify = oracle
+        qlog = []
+        if queries_dir is not None and verify is not None:  # Exp124: every verifier query of this run (kind, frame, box, p, returned box)
+            def logged(kind, fn, fc=fc, qlog=qlog):
+                def f(img, boxes):
+                    p, reg = fn(img, boxes)
+                    for b, q, r in zip(np.asarray(boxes, float).reshape(-1, 4), np.asarray(p, float), np.asarray(reg, float).reshape(-1, 4)):
+                        qlog.append((kind, fc.frame, *b, q, *r))
+                    return p, reg
+                return f
+            base_fill, base_birth = fc.verify, fc.verify_birth or fc.verify
+            fc.verify, fc.verify_birth, fc.log_birth_low = logged("fill", base_fill), logged("birth", base_birth), logged("birth_low", base_birth)
         if claim:
             from fctrack.online_head import OnlineHead
             fc.head, fc.features, fc.seq = OnlineHead(claim, claim["seed"] + int(name[-2:]), glob), features, name
@@ -117,6 +130,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None):
                 x, y, w, h = box
                 if w * h > 0:
                     rows.append("{},{},{},{},{},{},{},-1,-1,-1\n".format(frame, tid, round(x, 1), round(y, 1), round(w, 1), round(h, 1), round(score, 2)))
+        if queries_dir is not None:
+            queries_dir.mkdir(parents=True, exist_ok=True)
+            (queries_dir / f"{name}.csv").write_text("kind,frame,x,y,w,h,p,rx,ry,rw,rh\n" + "".join(
+                ",".join([q[0], str(q[1])] + [repr(float(v)) for v in q[2:]]) + "\n" for q in qlog))
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
@@ -152,6 +169,7 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--limit", type=int, default=0, help="smoke test only: the first k sequences")
     ap.add_argument("--log-attempts", action="store_true", help="write one csv row per verified fill-in attempt to <output>/attempts/<arm>/")
+    ap.add_argument("--log-queries", action="store_true", help="Exp124: write every verifier query (fill, birth, birth_low) to <output>/queries/<arm>/")
     a = ap.parse_args()
     root = a.root.resolve()
     cfg = json.loads(a.config.read_text())
@@ -163,7 +181,8 @@ def main():
     for arm_name, arm in arms.items():
         tracks = out / "tracks" / arm_name
         names, stats, digests = run_arm(root, cfg, cell, arm, tracks, a.device, a.limit,
-                                        out / "attempts" / arm_name if a.log_attempts else None)
+                                        out / "attempts" / arm_name if a.log_attempts else None,
+                                        out / "queries" / arm_name if a.log_queries else None)
         e = evaluate(root / cell["dataset_root"], cell["split"], tracks, out / "metrics" / f"{arm_name}.json", names)
         m, h = e["overall"]["motmetrics"], e["overall"]["hota"]
         overall = {"MOTA": m["mota"], "IDF1": m["idf1"], "HOTA": h["HOTA"], "DetA": h["DetA"], "AssA": h["AssA"],
