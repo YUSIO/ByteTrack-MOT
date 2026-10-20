@@ -26,6 +26,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from fctrack.prior_inject import PriorInjection, PriorYOLOX
 from fctrack.slot_prior import render
+from fctrack.weaken import weaken
 from yolox.data.data_augment import preproc
 from yolox.exp import get_exp
 
@@ -48,8 +49,9 @@ def load_slots(path):
 
 
 class SlotFrames(torch.utils.data.Dataset):
-    def __init__(self, entries, prior_cfg, size, max_labels=120, flip=0.5, seed=0):
+    def __init__(self, entries, prior_cfg, size, max_labels=120, flip=0.5, seed=0, weaken_cfg=None):
         self.size, self.prior_cfg, self.max_labels, self.flip, self.seed, self.epoch = size, prior_cfg, max_labels, flip, seed, 0
+        self.weaken_cfg = weaken_cfg  # Exp121: slot-anchored weakening of targets (fctrack.weaken); None = off
         self.items, self.meta, self.gt, self.slots = [], {}, {}, {}
         for e in entries:
             view, sdir = Path(e["view"]), Path(e["slots"])
@@ -77,6 +79,11 @@ class SlotFrames(torch.utils.data.Dataset):
         boxes = self.gt[key].get(f, np.zeros((0, 4))).copy()
         rng = np.random.default_rng([self.seed, self.epoch, i])
         flip = rng.random() < self.flip
+        wk = np.zeros(3, np.float32)
+        if self.weaken_cfg:
+            img = img.copy()
+            st = weaken(img, self.slots[key].get(f, []), boxes, self.weaken_cfg, np.random.default_rng([self.seed, self.epoch, i, 1]), self.prior_cfg["lost_order"])
+            wk[:] = (st["pos"], st["neg_lost"], st["neg_bg"])
         if flip:
             img = img[:, ::-1]
             boxes[:, 0] = w - boxes[:, 0] - boxes[:, 2]
@@ -89,7 +96,7 @@ class SlotFrames(torch.utils.data.Dataset):
         b = np.stack([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1], 1)[keep] * r
         n = min(len(b), self.max_labels)
         lab[:n, 1:] = b[:n]
-        return torch.from_numpy(x), torch.from_numpy(prior), torch.from_numpy(lab)
+        return torch.from_numpy(x), torch.from_numpy(prior), torch.from_numpy(lab), torch.from_numpy(wk)
 
 
 def freeze_bn(model):
@@ -106,6 +113,7 @@ def main():
     ap.add_argument("--prior-config", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--no-inject", action="store_true")
+    ap.add_argument("--weaken", type=Path, default=None, help="Exp121: json of the weakening augmentation (fctrack.weaken)")
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--lr-inject", type=float, default=1e-3)
@@ -131,7 +139,8 @@ def main():
     inj = None if a.no_inject else PriorInjection(chans, prior_channels=2).to(dev)
     model = PriorYOLOX(base, inj)
     prior_cfg = json.loads(a.prior_config.read_text())
-    ds = SlotFrames(json.loads(a.data.read_text()), prior_cfg, size, seed=a.seed)
+    weaken_cfg = json.loads(a.weaken.read_text()) if a.weaken else None
+    ds = SlotFrames(json.loads(a.data.read_text()), prior_cfg, size, seed=a.seed, weaken_cfg=weaken_cfg)
     groups = [{"params": list(base.backbone.parameters()), "lr": a.lr_backbone}, {"params": list(base.head.parameters()), "lr": a.lr_head}]
     if inj is not None:
         groups.append({"params": list(inj.parameters()), "lr": a.lr_inject})
@@ -141,7 +150,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=a.amp)
     tb = SummaryWriter(a.output / "tb")
     log = open(a.output / "train_log.jsonl", "w")
-    meta = {"args": {k: str(v) for k, v in vars(a).items()}, "channels": chans, "frames": len(ds), "steps": steps, "prior": prior_cfg,
+    meta = {"args": {k: str(v) for k, v in vars(a).items()}, "channels": chans, "frames": len(ds), "steps": steps, "prior": prior_cfg, "weaken": weaken_cfg,
             "trainable_parameters": {"detector": sum(p.numel() for p in base.parameters()), "inject": sum(p.numel() for p in inj.parameters()) if inj else 0}}
     (a.output / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps(meta), flush=True)
@@ -152,7 +161,7 @@ def main():
                                              generator=torch.Generator().manual_seed(a.seed * 1000 + epoch))
         model.train(); freeze_bn(model)
         sums, iters = {}, 0
-        for x, prior, lab in loader:
+        for x, prior, lab, wk in loader:
             x, prior, lab = x.to(dev, non_blocking=True), prior.to(dev, non_blocking=True), lab.to(dev, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16, enabled=a.amp):
                 out = model.losses(x, lab, prior if inj is not None else None)
@@ -162,7 +171,8 @@ def main():
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
             scaler.step(opt); scaler.update(); sched.step(); step += 1; iters += 1
-            vals = {"total": float(loss), "prior_share": float((prior.amax((1, 2, 3)) > 0).float().mean())}
+            vals = {"total": float(loss.detach()), "prior_share": float((prior.amax((1, 2, 3)) > 0).float().mean()),
+                    "weaken/pos": float(wk[:, 0].sum()), "weaken/neg_lost": float(wk[:, 1].sum()), "weaken/neg_bg": float(wk[:, 2].sum())}
             for path, (tot, iou_l, conf_l, cls_l, l1_l, nfg) in out.items():
                 vals.update({f"{path}/total": float(tot), f"{path}/iou": float(iou_l), f"{path}/conf": float(conf_l), f"{path}/l1": float(l1_l), f"{path}/num_fg": float(nfg)})
             for k, v in vals.items():
