@@ -2,6 +2,8 @@
 resized to 224 x 128; seed: scale-normalised crop with box regression).
 
 Reads annotated training frames only. Sequences named in `held_out` are used for validation, never for fitting.
+Exp123: the `weaken` block of the training config switches on the weakening of the seeds (fctrack.verifier.FrameSamples); the
+held-out validation is then run twice, on clean and on weakened seeds (fixed per frame). TensorBoard events in <output>/tb.
 """
 import argparse
 import json
@@ -82,13 +84,19 @@ def main():
     fit, val = [d for d in seqs if d.name not in held], [d for d in seqs if d.name in held]
     a.output.mkdir(parents=True, exist_ok=False)
     pre = tr.get("preload", False)
-    train_set = FrameSamples(fit, a.kind, tr["per_frame"], True, step=tr["frame_step"], preload=pre)
+    wk = tr.get("weaken")
+    train_set = FrameSamples(fit, a.kind, tr["per_frame"], True, step=tr["frame_step"], preload=pre, weaken=wk)
     val_set = FrameSamples(val, a.kind, tr["per_frame"], False, step=tr["val_frame_step"], seed=tr["seed"], preload=pre) if val else None
+    wk_val = tr.get("weaken_validation", {"p_pos": 0.5, "p_neg": 0.5})
+    vw_set = FrameSamples(val, a.kind, tr["per_frame"], False, step=tr["val_frame_step"], seed=tr["seed"], preload=pre, weaken=wk_val) if val else None
     info = {"kind": a.kind, "data": a.data, "fit_sequences": [d.name for d in fit], "held_out_sequences": [d.name for d in val],
             "fit_frames": len(train_set), "held_out_frames": len(val_set) if val_set else 0, "device": a.device, "torch": torch.__version__}
     print(json.dumps(info), flush=True)
     loader = DataLoader(train_set, batch_size=tr["frames_per_batch"], shuffle=True, num_workers=tr["workers"], collate_fn=collate, drop_last=True, persistent_workers=True)
     vloader = DataLoader(val_set, batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"], collate_fn=collate) if val_set else None
+    vwloader = DataLoader(vw_set, batch_size=tr["frames_per_batch"], shuffle=False, num_workers=tr["workers"], collate_fn=collate) if vw_set else None
+    from torch.utils.tensorboard import SummaryWriter
+    tb = SummaryWriter(a.output / "tb")
     model = (PaperVerifier(pretrained=tr.get("pretrained", True)) if a.kind.startswith("paper") else SeedVerifier()).to(a.device)
     opt = torch.optim.AdamW(model.parameters(), lr=tr["lr"], weight_decay=tr["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, tr["lr"], total_steps=tr["epochs"] * len(loader), pct_start=0.1)
@@ -113,13 +121,21 @@ def main():
             opt.step()
             sched.step()
             tot, steps = tot + loss.item(), steps + 1
+            if steps % 50 == 0:
+                tb.add_scalar("train/loss", loss.item(), ep * len(loader) + steps)
+                tb.add_scalar("train/lr", sched.get_last_lr()[0], ep * len(loader) + steps)
         rec = {"epoch": ep + 1, "train_loss": tot / steps, "seconds": int(time.time() - t0)}
         if vloader is not None:
             rec.update(validate(a.kind, model, vloader, a.device))
+            rec.update({"weak_" + k: v for k, v in validate(a.kind, model, vwloader, a.device).items()})
+        for k, v in rec.items():
+            if k not in ("epoch", "seconds") and isinstance(v, (int, float)):
+                tb.add_scalar(("val_weak/" + k[5:]) if k.startswith("weak_") else ("val/" + k if k != "train_loss" else "train/epoch_loss"), v, ep + 1)
         log.append(rec)
         print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in rec.items()}), flush=True)
         torch.save(model.state_dict(), a.output / "last.pt")
     (a.output / "train_log.json").write_text(json.dumps({"info": info, "config": tr, "epochs": log}, indent=1) + "\n")
+    tb.close()
 
 
 if __name__ == "__main__":

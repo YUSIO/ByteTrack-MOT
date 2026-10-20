@@ -10,6 +10,10 @@ seed    A small network on a crop that covers ZOOM x the box side at a fixed 64 
         centre lies within R_POS box sides of the estimated centre, and regresses that UAV's box. Not in the paper.
 
 Training samples are drawn from annotated training frames only; no detector or tracker output is read.
+
+Exp123: `weaken` = {"p_pos", "p_neg"} weakens a seed's image before it is cropped (fctrack.weaken.apply_op on a local window
+of the frame: blur, down-up, contrast or partial occlusion): a positive seed's target UAV with probability p_pos (label and box
+target unchanged), a negative seed's queried place with probability p_neg (so that a weakened patch is no evidence by itself).
 """
 import configparser
 from pathlib import Path
@@ -113,8 +117,8 @@ def verify(kind, model, img, tlwh, device):
 class FrameSamples(Dataset):
     """One item = one annotated frame; returns `per_frame` training samples drawn from it."""
 
-    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0, preload=False):
-        self.kind, self.per_frame, self.train, self.seed = kind, per_frame, train, seed
+    def __init__(self, sequences, kind, per_frame, train, step=1, seed=0, preload=False, weaken=None):
+        self.kind, self.per_frame, self.train, self.seed, self.weaken = kind, per_frame, train, seed, weaken
         self.frames, self.images = [], None
         for d in sequences:
             d = Path(d)
@@ -217,7 +221,18 @@ class FrameSamples(Dataset):
             k = int(d.argmin())
             y = 1.0 if d[k] <= R_POS else 0.0 if d[k] >= R_NEG else -1.0
             flip = bool(self.train and rng.random() < 0.5)
-            x = seed_crop(img, c[0], c[1], side, flip)
+            wk = self.weaken
+            if wk and y >= 0 and rng.random() < (wk["p_pos"] if y > 0.5 else wk["p_neg"]):
+                from fctrack.weaken import OPS, apply_op
+                x0, y0 = int(max(0, c[0] - 4 * side)), int(max(0, c[1] - 4 * side))
+                x1, y1 = int(min(W, c[0] + 4 * side + 1)), int(min(H, c[1] + 4 * side + 1))
+                win = img[y0:y1, x0:x1].copy()
+                box = (gc[k, 0] - x0, gc[k, 1] - y0, gt[k, 2], gt[k, 3]) if y > 0.5 else (c[0] - x0, c[1] - y0, side, side)
+                apply_op(win, box, OPS[int(rng.integers(len(OPS)))], rng, np.c_[gc[:, 0] - x0, gc[:, 1] - y0, gt[:, 2:]])
+                x = seed_crop(win, c[0] - x0, c[1] - y0, side, flip)
+                self.n_weak = getattr(self, "n_weak", 0) + 1
+            else:
+                x = seed_crop(img, c[0], c[1], side, flip)
             if self.train:
                 x = np.clip(x * rng.uniform(0.85, 1.15) + rng.uniform(-0.08, 0.08), 0, 1).astype(np.float32)
             dx = (gc[k, 0] - c[0]) / side
