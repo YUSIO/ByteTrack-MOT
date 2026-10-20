@@ -15,6 +15,8 @@ import numpy as np
 
 class Readout:
     def __init__(self, fairmot_root, backbone, head, device, use_template=True, cache_frames=48):
+        here = Path(__file__).resolve().parent  # the fctrack directory is on sys.path when run.py is started as a script;
+        sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != here]  # its tracker.py would shadow FairMOT's tracker package
         tools = Path(fairmot_root) / "tools"
         if str(tools) not in sys.path:
             sys.path.insert(0, str(tools))
