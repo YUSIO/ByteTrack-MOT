@@ -24,8 +24,10 @@ class PrebirthInferenceTests(unittest.TestCase):
                 self.assertLessEqual(w, 512)
                 self.assertLessEqual(h, 512)
             self.assertTrue((coverage > 0).all())
-        self.assertEqual(frame_bounds(7, "train"), (1, 3))
-        self.assertEqual(frame_bounds(7, "dev"), (4, 7))
+        self.assertEqual(frame_bounds(7, "train"), (1, 4))
+        self.assertEqual(frame_bounds(7, "dev"), (5, 7))
+        self.assertEqual(frame_bounds(164, "train"), (1, 83))
+        self.assertEqual(frame_bounds(164, "dev"), (84, 164))
 
     def test_decode_uses_raw_offset_and_removes_padding_before_budget(self):
         heat = torch.full((1, 1, 4, 4), -20.0)
@@ -99,8 +101,8 @@ class PrebirthInferenceTests(unittest.TestCase):
             root = Path(temp)
             sequence = root / "UAVSwarm-01"
             (sequence / "img1").mkdir(parents=True)
-            (sequence / "seqinfo.ini").write_text("[Sequence]\nseqLength=4\nimWidth=12\nimHeight=8\nimDir=img1\nimExt=.png\n")
-            for frame in range(1, 5):
+            (sequence / "seqinfo.ini").write_text("[Sequence]\nseqLength=6\nimWidth=12\nimHeight=8\nimDir=img1\nimExt=.png\n")
+            for frame in range(1, 7):
                 cv2.imwrite(str(sequence / "img1" / f"{frame:06d}.png"), np.full((8, 12, 3), frame * 20, np.uint8))
             args = SimpleNamespace(split="dev", tile_size=16, overlap=4, history_gap=1,
                                    frame_numbering="split", batch_size=2, threshold=.05,
@@ -108,12 +110,12 @@ class PrebirthInferenceTests(unittest.TestCase):
                                    nms_iou=.5, topk=100)
             model = RecordingModel()
             result = export_sequence(model, sequence, root / "out", args, torch.device("cpu"))
-            np.testing.assert_allclose(np.asarray(model.history) * 255, [[60, 60, 60], [80, 60, 60]], atol=1e-4)
+            np.testing.assert_allclose(np.asarray(model.history) * 255, [[100, 100, 100], [120, 100, 100]], atol=1e-4)
             rows = parse_rows((root / "out/det.txt").read_bytes(), "export")
             self.assertEqual([row[0] for _, row in rows], [1, 2])
-            self.assertEqual(result["source_frame_start"], 3)
+            self.assertEqual(result["source_frame_start"], 5)
             records = [json.loads(line) for line in (root / "out/frame_stats.jsonl").read_text().splitlines()]
-            self.assertEqual(records[1]["history_frames"], [4, 3, 3])
+            self.assertEqual(records[1]["history_frames"], [6, 5, 5])
 
 
 if __name__ == "__main__":

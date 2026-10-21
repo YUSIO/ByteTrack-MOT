@@ -49,7 +49,11 @@ def resolve_train_root(root: str | Path) -> Path:
 
 
 def read_sequences(root: str | Path, split: str, names: list[str] | None = None):
-    """Read only train GT; split boundaries use floor(seqLength / 2)."""
+    """Read train GT with the existing V1 half protocol.
+
+    Train uses 1..floor(seqLength/2)+1 and dev uses floor(seqLength/2)+2..N,
+    matching the established detector training and Exp089 dev_view exactly.
+    """
     if split not in {"train", "dev"}:
         raise ValueError("Only train/dev halves are valid for fitting and selection")
     root = resolve_train_root(root)
@@ -72,7 +76,7 @@ def read_sequences(root: str | Path, split: str, names: list[str] | None = None)
         section = info["Sequence"]
         n = section.getint("seqLength")
         width, height = section.getint("imWidth"), section.getint("imHeight")
-        cut = n // 2
+        cut = n // 2 + 1
         start, end = (1, cut) if split == "train" else (cut + 1, n)
         if start > end:
             raise ValueError(f"Sequence {directory.name} cannot be split: length={n}")
@@ -110,6 +114,7 @@ def read_sequences(root: str | Path, split: str, names: list[str] | None = None)
         labels = {f: np.asarray(v, np.float32) for f, v in labels.items()}
         sequences.append(Sequence(directory.name, directory, images, labels, start, end, width, height))
         sources.append({"sequence": directory.name, "source_root": str(directory),
+                        "split_rule": "train=1..floor(N/2)+1; dev=floor(N/2)+2..N",
                         "source_seq_length": n, "split": split, "first_frame": start,
                         "last_frame": end, "frames": end - start + 1, "history_min_frame": start,
                         "width": width, "height": height, "gt_rows_in_split": len(rows),

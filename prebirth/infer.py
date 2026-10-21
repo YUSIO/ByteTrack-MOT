@@ -1,7 +1,8 @@
 """Causal, image-only dense proposals for Exp138. Never reads annotations.
 
 Run as ``python -m prebirth.infer``. ``split=train/dev`` means the first/second
-half of each official training sequence; ``full`` processes the supplied view.
+half of each official training sequence using the existing Exp088 boundary
+(train ends at floor(length/2)+1); ``full`` processes the supplied view.
 By default exported frame indices start at one within the selected split, so a
 dev export can be consumed with the corresponding reindexed MOT dev view.
 """
@@ -53,9 +54,9 @@ def read_sequence_info(path):
 
 def frame_bounds(length, split):
     if split == "train":
-        bounds = (1, length // 2)
+        bounds = (1, min(length, length // 2 + 1))
     elif split == "dev":
-        bounds = (length // 2 + 1, length)
+        bounds = (length // 2 + 2, length)
     else:
         bounds = (1, length)
     if bounds[1] < bounds[0]:
