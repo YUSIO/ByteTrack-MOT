@@ -116,34 +116,46 @@ def decode_batch(outputs, coordinates, image_shape, threshold, topk_per_tile,
         raise ValueError("Offset/heatmap shapes do not agree")
     if outputs["log_wh"].shape != outputs["offset"].shape:
         raise ValueError("Box/offset shapes do not agree")
-    maxima = heat.eq(F.max_pool2d(heat, 3, stride=1, padding=1))
+    raw_maxima = heat.eq(F.max_pool2d(heat, 3, stride=1, padding=1))
     height, width = image_shape
     result, counts = [], {"threshold_localmax": 0, "tile_budget_candidates": 0,
-                          "invalid_or_padding": 0, "decoded": 0}
+                          "invalid_or_padding": 0, "rescued_localmax": 0, "decoded": 0}
     max_size = max_box_size if max_box_size else tile_size
+    grid_h, grid_w = heat.shape[-2:]
+    grid_y, grid_x = torch.meshgrid(torch.arange(grid_h, device=heat.device),
+                                  torch.arange(grid_w, device=heat.device), indexing="ij")
+    grid = torch.stack((grid_x.flatten(), grid_y.flatten()), dim=1)
     for b, (left, top, valid_w, valid_h) in enumerate(coordinates):
-        mask = maxima[b, 0] & (heat[b, 0] >= threshold)
-        ys, xs = torch.where(mask)
-        counts["threshold_localmax"] += len(xs)
-        scores = heat[b, 0, ys, xs]
-        if not len(scores):
-            continue
-        offset = outputs["offset"][b, :, ys, xs].T
-        log_wh = outputs["log_wh"][b, :, ys, xs].T
-        center = (torch.stack((xs, ys), dim=1).to(offset.dtype) + offset) * 4.0
+        # Determine the existing decode validity before local peak competition.
+        # A grid cell in padding may still decode inside via its raw offset; use
+        # decoded geometry, not the grid index, to preserve that admission rule.
+        offset = outputs["offset"][b].reshape(2, -1).T
+        log_wh = outputs["log_wh"][b].reshape(2, -1).T
+        center = (grid.to(offset.dtype) + offset) * 4.0
         wh = log_wh.clamp(math.log(min_box_size), math.log(max_size)).exp()
         finite = torch.isfinite(center).all(1) & torch.isfinite(log_wh).all(1)
         valid = (finite & (center[:, 0] >= 0) & (center[:, 0] < valid_w)
                  & (center[:, 1] >= 0) & (center[:, 1] < valid_h))
-        counts["invalid_or_padding"] += int((~valid).sum().item())
-        center = center[valid] + center.new_tensor((left, top))
-        wh, scores = wh[valid], scores[valid]
+        center = center + center.new_tensor((left, top))
         boxes = torch.cat((center - wh / 2, center + wh / 2), dim=1)
         boxes[:, 0::2].clamp_(0, width)
         boxes[:, 1::2].clamp_(0, height)
         good = ((boxes[:, 2] - boxes[:, 0]) >= min_box_size) & ((boxes[:, 3] - boxes[:, 1]) >= min_box_size)
-        counts["invalid_or_padding"] += int((~good).sum().item())
-        boxes, scores = boxes[good], scores[good]
+        valid = (valid & good).reshape(grid_h, grid_w)
+        eligible_heat = heat[b:b + 1].masked_fill(~valid[None, None], float("-inf"))
+        maxima = eligible_heat.eq(F.max_pool2d(eligible_heat, 3, stride=1, padding=1))[0, 0]
+        mask = valid & maxima & (heat[b, 0] >= threshold)
+        raw_mask = raw_maxima[b, 0] & (heat[b, 0] >= threshold)
+        # Keep the old raw-peak/rejection counters; separately report valid peaks
+        # restored by excluding an invalid neighbor from local competition.
+        counts["threshold_localmax"] += int(raw_mask.sum().item())
+        counts["invalid_or_padding"] += int((raw_mask & ~valid).sum().item())
+        counts["rescued_localmax"] += int((mask & ~raw_mask).sum().item())
+        ys, xs = torch.where(mask)
+        scores = heat[b, 0, ys, xs]
+        if not len(scores):
+            continue
+        boxes = boxes[ys * grid_w + xs]
         if len(scores) > topk_per_tile:
             selected = torch.argsort(scores, descending=True, stable=True)[:topk_per_tile]
             boxes, scores = boxes[selected], scores[selected]
@@ -195,7 +207,7 @@ def export_sequence(model, directory, output, args, device):
     output.mkdir(parents=True, exist_ok=False)
     det_file = output / "det.txt"
     stats_path = output / "frame_stats.jsonl"
-    totals = {"frames": 0, "tiles": 0, "threshold_localmax": 0,
+    totals = {"frames": 0, "tiles": 0, "threshold_localmax": 0, "rescued_localmax": 0,
               "tile_budget_candidates": 0, "invalid_or_padding": 0, "decoded": 0,
               "after_nms": 0, "exported": 0, "model_seconds": 0.0}
     begin = time.perf_counter()
@@ -206,7 +218,7 @@ def export_sequence(model, directory, output, args, device):
             frame_stats = {"frame": frame if args.frame_numbering == "original" else frame - start + 1,
                            "source_frame": frame, "history_frames": history,
                            "distinct_observed_frames": len(set(history)), "tiles": len(tiles),
-                           "threshold_localmax": 0, "tile_budget_candidates": 0,
+                           "threshold_localmax": 0, "rescued_localmax": 0, "tile_budget_candidates": 0,
                            "invalid_or_padding": 0, "decoded": 0, "model_seconds": 0.0}
             decoded = []
             for offset in range(0, len(tiles), args.batch_size):
@@ -329,6 +341,7 @@ def main():
                               "decode": "fp32"},
                 "annotation_access": False, "history_order": "current,t-gap,t-2gap",
                 "padding": "RGB zero; centers outside original tile support are discarded",
+                "local_peak_policy": "Exclude invalid decoded centers/boxes before 3x3 peak competition; rescued_localmax counts restored valid peaks",
                 "score_semantics": "sigmoid heatmap, uncalibrated, unchanged in export",
                 "sequences": {}}
     write_json(args.out / "metadata.json", metadata)

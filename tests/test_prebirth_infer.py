@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from prebirth.infer import decode_batch, export_sequence, frame_bounds, nms, tile_coordinates
 from prebirth.merge import merge_sequence, parse_rows, select_additions
@@ -43,6 +44,90 @@ class PrebirthInferenceTests(unittest.TestCase):
         self.assertEqual(counts["invalid_or_padding"], 1)
         self.assertEqual(counts["tile_budget_candidates"], 1)
         self.assertAlmostEqual(rows[0, 4], torch.sigmoid(torch.tensor(2.)).item())
+
+    def test_adjacent_padding_peak_cannot_suppress_valid_peak(self):
+        heat = torch.full((1, 1, 4, 4), -20.0)
+        heat[0, 0, 1, 1] = 2.0  # Valid decoded center (4, 4).
+        heat[0, 0, 2, 1] = 8.0  # Adjacent center (4, 8), outside height 8.
+        offset = torch.zeros((1, 2, 4, 4))
+        predictions = {"heatmap": heat, "offset": offset,
+                       "log_wh": torch.full_like(offset, math.log(4.0))}
+        rows, counts = decode_batch(predictions, [(0, 0, 16, 8)], (8, 16), .1, 1, 16, 2, 0)
+        np.testing.assert_array_equal(rows[0, :4], (2, 2, 6, 6))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(counts["threshold_localmax"], 1)
+        self.assertEqual(counts["invalid_or_padding"], 1)
+        self.assertEqual(counts["rescued_localmax"], 1)
+
+    def test_peak_validity_uses_decoded_center_instead_of_grid_index(self):
+        for high_grid_y, high_offset_y, valid in ((2, -.5, True), (1, 1., False)):
+            with self.subTest(high_grid_y=high_grid_y):
+                heat = torch.full((1, 1, 4, 4), -20.0)
+                low_grid_y = high_grid_y - 1
+                heat[0, 0, low_grid_y, 1] = 2.
+                heat[0, 0, high_grid_y, 1] = 8.
+                offset = torch.zeros((1, 2, 4, 4))
+                offset[0, 1, low_grid_y, 1] = .5
+                offset[0, 1, high_grid_y, 1] = high_offset_y
+                predictions = {"heatmap": heat, "offset": offset,
+                               "log_wh": torch.full_like(offset, math.log(4.))}
+                rows, counts = decode_batch(predictions, [(0, 0, 16, 8)], (8, 16), .1, 100, 16, 2, 0)
+                self.assertEqual(len(rows), 1)
+                expected_score = torch.sigmoid(torch.tensor(8. if valid else 2.)).item()
+                self.assertEqual(rows[0, 4], expected_score)
+                self.assertEqual(counts["rescued_localmax"], int(not valid))
+
+    def test_invalid_geometry_cannot_suppress_valid_neighbor(self):
+        for failure in ("clipped_too_small", "nonfinite_center", "nonfinite_size"):
+            with self.subTest(failure=failure):
+                heat = torch.full((1, 1, 4, 4), -20.)
+                heat[0, 0, 1, 1] = 2.
+                heat[0, 0, 1, 0] = 8.
+                offset = torch.zeros((1, 2, 4, 4))
+                log_wh = torch.full_like(offset, math.log(4.))
+                if failure == "clipped_too_small":
+                    log_wh[0, :, 1, 0] = math.log(2.)  # Center x=0; clipped width=1.
+                elif failure == "nonfinite_center":
+                    offset[0, 0, 1, 0] = float("nan")
+                else:
+                    log_wh[0, 0, 1, 0] = float("inf")
+                rows, counts = decode_batch({"heatmap": heat, "offset": offset, "log_wh": log_wh},
+                                            [(0, 0, 16, 16)], (16, 16), .1, 100, 16, 2, 0)
+                self.assertEqual(len(rows), 1)
+                np.testing.assert_array_equal(rows[0, :4], (2, 2, 6, 6))
+                self.assertEqual(counts["invalid_or_padding"], 1)
+                self.assertEqual(counts["rescued_localmax"], 1)
+
+    def test_all_valid_decode_matches_original_sparse_reference_exactly(self):
+        generator = torch.Generator().manual_seed(138)
+        outputs = {"heatmap": torch.randn((2, 1, 8, 8), generator=generator),
+                   "offset": torch.full((2, 2, 8, 8), .5),
+                   "log_wh": (torch.rand((2, 2, 8, 8), generator=generator) * 8 + 4).log()}
+        coordinates = [(0, 0, 32, 32), (11, 7, 32, 32)]
+        heat = outputs["heatmap"].sigmoid()
+        original_peaks = heat.eq(F.max_pool2d(heat, 3, 1, 1)) & (heat >= .2)
+        for budget in (1, 7, 128):
+            with self.subTest(budget=budget):
+                # Legacy sparse arithmetic for this all-valid fixture. This checks
+                # bitwise coordinates/scores/order independently of dense decoding.
+                expected = []
+                for b, (left, top, _, _) in enumerate(coordinates):
+                    ys, xs = torch.where(original_peaks[b, 0])
+                    center = (torch.stack((xs, ys), 1).float() + outputs["offset"][b, :, ys, xs].T) * 4.
+                    wh = outputs["log_wh"][b, :, ys, xs].T.clamp(math.log(2.), math.log(32.)).exp()
+                    center = center + center.new_tensor((left, top))
+                    boxes = torch.cat((center - wh / 2, center + wh / 2), 1)
+                    boxes[:, 0::2].clamp_(0, 43)
+                    boxes[:, 1::2].clamp_(0, 39)
+                    scores = heat[b, 0, ys, xs]
+                    if len(scores) > budget:
+                        selected = torch.argsort(scores, descending=True, stable=True)[:budget]
+                        boxes, scores = boxes[selected], scores[selected]
+                    expected.extend(torch.cat((boxes, scores[:, None]), 1).numpy())
+                rows, counts = decode_batch(outputs, coordinates, (39, 43), .2, budget, 32, 2, 0)
+                np.testing.assert_array_equal(rows, np.asarray(expected))
+                self.assertEqual(counts["invalid_or_padding"], 0)
+                self.assertEqual(counts["rescued_localmax"], 0)
 
     def test_tile_duplicates_suppressed_without_losing_other_objects(self):
         proposals = [[1, 1, 9, 9, .8], [1.1, 1.1, 9.1, 9.1, .9], [20, 20, 28, 28, .7]]
