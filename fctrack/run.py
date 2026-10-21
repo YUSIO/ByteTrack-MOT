@@ -35,7 +35,7 @@ ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,pr
                    "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y")
 
 
-def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, queries_dir=None):
+def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, queries_dir=None, controller_factory=None):
     wrap_stracks(STrack)
     verify = None
     if arm.get("verifier"):
@@ -115,6 +115,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
+        controller = controller_factory(name, fc, data / name) if controller_factory is not None else None
         rows = []
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]
@@ -126,7 +127,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
                     cache.append(cv2.imread(str(data / name / "img1" / f"{frame:06d}.jpg")))
                 return cache[0]
 
-            for tid, box, score in fc.step(det, shape, image):
+            frame_rows = fc.step(det, shape, image)
+            if controller is not None:
+                controller.observe(frame, frame_rows)
+            for tid, box, score in frame_rows:
                 x, y, w, h = box
                 if w * h > 0:
                     rows.append("{},{},{},{},{},{},{},-1,-1,-1\n".format(frame, tid, round(x, 1), round(y, 1), round(w, 1), round(h, 1), round(score, 2)))
@@ -136,6 +140,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
                 ",".join([q[0], str(q[1])] + [repr(float(v)) for v in q[2:]]) + "\n" for q in qlog))
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
+        if controller is not None:
+            controller.finish()
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
         if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
             (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(

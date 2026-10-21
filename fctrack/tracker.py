@@ -75,9 +75,34 @@ class FCTrack:
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
         self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
         self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
+        self.decision_hook = None       # Exp139: optional (kind, mutable event) -> bool; changes only the verifier p gate
+
+    def _check_decision_hook(self):
+        """The first diagnostic supports A_orig's single-query verifier paths only."""
+        if self.decision_hook is None:
+            return
+        if self.out is not None or self.head is not None:
+            raise ValueError("decision_hook does not support outlier or claim paths")
+        if self.rec is not None:
+            if "+" in self.rec["estimator"] or self.rec.get("iterations", 1) != 1:
+                raise ValueError("decision_hook requires one estimator proposal per track and one verifier pass")
+            if self.verify is None or not self.rec.get("write", True):
+                raise ValueError("decision_hook requires a verifier and written recoveries")
+        if self.bth is not None:
+            if self.bth["rule"] != "verifier" or (self.verify_birth or self.verify) is None:
+                raise ValueError("decision_hook supports only verifier births")
+
+    def _hook_gate(self, kind, event):
+        accepted = self.decision_hook(kind, event)
+        if not isinstance(accepted, (bool, np.bool_)):
+            raise TypeError("decision_hook must return a bool")
+        event["decision_accept"] = bool(accepted)
+        event["intervened"] = bool(accepted) != event["native_accept"]
+        return bool(accepted)
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
+        self._check_decision_hook()
         self.frame += 1
         f, (H, W) = self.frame, shape
         outs = self.t.update(det.copy(), shape, shape)
@@ -131,6 +156,7 @@ class FCTrack:
         rule says so (all: always; verifier: the FCTrack verifier's p >= p_min on the detection box; oracle: it matches at
         IoU >= 0.5 a GT member no written row matches, ceiling only). A ByteTrack track started on the same box in this
         frame (unconfirmed, not written) is activated instead of starting a second one. Highest score first."""
+        self._check_decision_hook()
         b = self.bth
         if not len(det):
             return []
@@ -147,11 +173,27 @@ class FCTrack:
             return []
         self.stats["birth_candidates"] += len(sel)
         final = tlwh.copy()
+        events = None
         if b["rule"] == "verifier":
             p, reg = (self.verify_birth or self.verify)(image(), tlwh[sel])
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
-            ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            gate = np.asarray(p) >= b["p_min"]
+            if self.decision_hook is not None:
+                events = {}
+                gate = gate.copy()
+                for i, k in enumerate(sel):
+                    event = {"frame": int(f), "candidate_index": i, "detection_index": int(k),
+                             "track_id": None, "proposal": tlwh[k].tolist(), "final": final[k].tolist(),
+                             "p": float(p[i]), "native_accept": bool(gate[i]), "threshold": float(b["p_min"]),
+                             "det_score": float(det[k, 4]), "outcome": "pending"}
+                    events[int(k)] = event
+                    gate[i] = self._hook_gate("birth", event)
+                    if not gate[i]:
+                        event["outcome"] = "below_p"
+                    elif not (final[k, 2] > 1 and final[k, 3] > 1):
+                        event["outcome"] = "degenerate"
+            ok = gate & (final[sel, 2] > 1) & (final[sel, 3] > 1)
             sel = sel[ok]
         elif b["rule"] in ("policy", "all_logged"):
             # Exp115: every uncovered candidate >= lo is scored by the verifier; the written box is the regressed one (as
@@ -182,6 +224,8 @@ class FCTrack:
         for k in sel[np.argsort(-det[sel, 4])]:
             box = final[k]
             if len(taken) and iou_matrix(box, taken).max() >= b["cover_iou"]:
+                if events is not None:
+                    events[int(k)]["outcome"] = "overlap"
                 continue
             same = [t for t in self.t.tracked_stracks if not t.is_activated and t.frame_id == f
                     and iou_matrix(tlwh[k], t.tlwh).max() >= 0.7]
@@ -200,6 +244,8 @@ class FCTrack:
             self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
             taken = np.vstack((taken, box))
             added.append([t.track_id, box.copy(), det[k, 4], t])
+            if events is not None:
+                events[int(k)].update(outcome="written", track_id_after=int(t.track_id))
             if b["rule"] in ("policy", "all_logged"):
                 self.birth_log.append({"frame": f, "score": float(det[k, 4]), "p": pmap[int(k)], "box": box.copy(), "t": t})
             self.stats["born"] += 1
@@ -271,6 +317,7 @@ class FCTrack:
             self.stats["relabelled"] += 1
 
     def recover(self, f, det, cur, W, H, image):
+        self._check_decision_hook()
         r = self.rec
         cur_boxes = np.array(list(cur.values())).reshape(-1, 4)
         usable = det[det[:, 4] > 0.1]
@@ -313,13 +360,27 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
+        events = None
+        if self.decision_hook is not None:
+            events, gate = [], []
+            for i, (t, prop, used) in enumerate(cands):
+                m = self.meta[t.track_id]
+                event = {"frame": int(f), "candidate_index": i, "track_id": int(t.track_id),
+                         "proposal": prop.tolist(), "final": np.asarray(final[i], float).tolist(),
+                         "p": float(p[i]), "native_accept": bool(p[i] >= r["p_min"]),
+                         "threshold": float(r["p_min"]), "gap": int(f - t.frame_id),
+                         "since_real": int(f - m["real"]), "obs": int(m["obs"]),
+                         "estimator": used, "outcome": "pending"}
+                events.append(event)
+                gate.append(self._hook_gate("fill", event))
         if self.log:  # state before any decision of this frame (re-activation below changes frame_id and covariance)
             pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
                     float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]
         added, taken, done = [], cur_boxes, set()
-        decision = ["below_p" if p[i] < r["p_min"] else "" for i in range(len(cands))]
+        below = [p[i] < r["p_min"] for i in range(len(cands))] if events is None else [not x for x in gate]
+        decision = ["below_p" if below[i] else "" for i in range(len(cands))]
         for i in np.argsort(-p):
-            if p[i] < r["p_min"] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
+            if below[i] or final[i, 2] <= 1 or final[i, 3] <= 1 or cands[i][0].track_id in done:
                 decision[i] = decision[i] or ("done" if cands[i][0].track_id in done else "degenerate")
                 continue
             if len(taken) and iou_matrix(final[i], taken).max() >= r["iou_free"]:
@@ -338,6 +399,11 @@ class FCTrack:
                 added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
+            if events is not None:
+                events[i]["track_id_after"] = int(t.track_id)
+        if events is not None:
+            for event, outcome in zip(events, decision):
+                event["outcome"] = outcome
         if self.log:
             for i, (t, prop, used) in enumerate(cands):
                 gap, since_real, obs, cxx, cyy = pre[i]
