@@ -107,6 +107,8 @@ def nms(rows, threshold):
 def decode_batch(outputs, coordinates, image_shape, threshold, topk_per_tile,
                  tile_size, min_box_size, max_box_size):
     """Decode raw offset residuals (no sigmoid); scores alone use sigmoid."""
+    # Model autocast may return BF16. Decode sigmoid/exp/box geometry in FP32.
+    outputs = {name: outputs[name].float() for name in ("heatmap", "offset", "log_wh")}
     heat = outputs["heatmap"].sigmoid()
     if heat.ndim != 4 or heat.shape[1] != 1:
         raise ValueError(f"Unexpected heatmap shape {tuple(heat.shape)}")
@@ -217,7 +219,9 @@ def export_sequence(model, directory, output, args, device):
                 tensor = torch.from_numpy(batch).permute(0, 1, 4, 2, 3).to(device=device, dtype=torch.float32) / 255.0
                 sync(device)
                 tick = time.perf_counter()
-                with torch.inference_mode():
+                with torch.inference_mode(), torch.autocast(
+                        device_type=device.type, dtype=torch.bfloat16,
+                        enabled=device.type == "cuda" and getattr(args, "amp_dtype", "fp32") == "bf16"):
                     predictions = model(tensor)
                 sync(device)
                 frame_stats["model_seconds"] += time.perf_counter() - tick
@@ -261,6 +265,8 @@ def parser():
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--amp-dtype", choices=("bf16", "fp32"), default="bf16",
+                    help="CUDA model autocast; decoding always FP32. CPU/MPS always FP32")
     ap.add_argument("--tile-size", type=int, default=512)
     ap.add_argument("--overlap", type=int, default=64)
     ap.add_argument("--threshold", type=float, default=0.01)
@@ -297,6 +303,10 @@ def main():
     if not names:
         raise ValueError(f"No UAVSwarm sequences under {data}")
     device = torch.device(args.device)
+    if device.type == "cuda" and args.amp_dtype == "bf16":
+        with torch.cuda.device(device):
+            if not torch.cuda.is_bf16_supported():
+                raise RuntimeError("Requested CUDA BF16 is unsupported; explicitly select --amp-dtype fp32")
     model, model_config, training = load_model(args.checkpoint, device)
     mismatch = {}
     for saved_key, requested_key in (("patch_size", "tile_size"), ("history_gap", "history_gap")):
@@ -314,6 +324,9 @@ def main():
                 "inference_source_sha256": sha256(__file__),
                 "parameters": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                 "torch_version": str(torch.__version__), "numpy_version": np.__version__,
+                "precision": {"requested": args.amp_dtype,
+                              "model_effective": "bf16_autocast" if device.type == "cuda" and args.amp_dtype == "bf16" else "fp32",
+                              "decode": "fp32"},
                 "annotation_access": False, "history_order": "current,t-gap,t-2gap",
                 "padding": "RGB zero; centers outside original tile support are discarded",
                 "score_semantics": "sigmoid heatmap, uncalibrated, unchanged in export",
