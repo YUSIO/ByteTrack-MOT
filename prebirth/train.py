@@ -105,6 +105,12 @@ def to_device(batch, device):
             for key, value in batch.items()}
 
 
+def autocast_context(args, device):
+    dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
+    return torch.autocast(device_type=device.type, dtype=dtype,
+                          enabled=args.amp and device.type == "cuda")
+
+
 @torch.no_grad()
 def validate(model, loader, device, args):
     model.eval()
@@ -112,7 +118,7 @@ def validate(model, loader, device, args):
     counts = {str(t): {"tp": 0, "fp": 0, "fn": 0} for t in (0.1, 0.3)}
     for batch in loader:
         batch = to_device(batch, device)
-        with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
+        with autocast_context(args, device):
             output = model(batch["images"])
         _, losses = detection_loss(output, batch, args.offset_weight, args.wh_weight)
         n = len(batch["images"])
@@ -178,6 +184,8 @@ def parse_args():
     parser.add_argument("--wh-weight", type=float, default=0.1)
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--amp-dtype", choices=["bf16", "fp16"], default="bf16",
+                        help="CUDA autocast precision; gradient scaling is used only with fp16")
     parser.add_argument("--cpu-threads", type=int, default=4)
     parser.add_argument("--sequences", nargs="+", default=None, help="Optional preflight-only sequence subset")
     parser.add_argument("--log-every", type=int, default=25)
@@ -200,6 +208,10 @@ def main():
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(f"Requested device unavailable: {device}")
+    if device.type == "cuda" and args.amp and args.amp_dtype == "bf16":
+        with torch.cuda.device(device):
+            if not torch.cuda.is_bf16_supported():
+                raise RuntimeError(f"Requested bf16 autocast unsupported by {device}")
     # Importing TensorBoard is a preflight dependency check, never silently omit events.
     from torch.utils.tensorboard import SummaryWriter
     torch.set_num_threads(args.cpu_threads)
@@ -229,7 +241,8 @@ def main():
         return 0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    use_scaler = args.amp and device.type == "cuda" and args.amp_dtype == "fp16"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     start_epoch = 0
     parent = args.resume or args.init_checkpoint
     if parent:
@@ -239,7 +252,7 @@ def main():
             raise ValueError(f"Checkpoint model config {state.get('model_config')} != {expected}")
         model.load_state_dict(state["model"], strict=True)
         if args.resume:
-            for key in ("steps_per_epoch", "batch_size", "patch_size", "history_gap", "seed", "lr", "warmup_epochs", "epochs"):
+            for key in ("steps_per_epoch", "batch_size", "patch_size", "history_gap", "seed", "lr", "warmup_epochs", "epochs", "amp", "amp_dtype"):
                 if state["args"].get(key) != getattr(args, key):
                     raise ValueError(f"Resume changes {key}; use --init-checkpoint for a new training schedule")
             optimizer.load_state_dict(state["optimizer"])
@@ -262,6 +275,9 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     config = {**vars(args), "selection": "minimum fixed-dev-patch total loss among epochs completed in this attempt",
+              "precision": {"parameter_dtype": "float32",
+                            "autocast_dtype": args.amp_dtype if args.amp and device.type == "cuda" else "float32",
+                            "gradient_scaling": bool(use_scaler)},
               "sampling": "50% target-offset, 25% random, 25% background-seeking; all in-crop centers supervised",
               "history_order": [0, -args.history_gap, -2 * args.history_gap],
               "source_xywh_coordinates": "as recorded, no +/-1 conversion", "stride": 4,
@@ -290,7 +306,7 @@ def main():
             for step, batch in enumerate(train_loader):
                 batch = to_device(batch, device)
                 optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
+                with autocast_context(args, device):
                     output = model(batch["images"])
                 loss, values = detection_loss(output, batch, args.offset_weight, args.wh_weight)
                 if not torch.isfinite(loss):
