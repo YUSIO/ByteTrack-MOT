@@ -81,7 +81,7 @@ def make_parser():
     return parser
 
 
-@logger.catch
+@logger.catch(reraise=True)
 def main(exp, args):
     if exp.seed is not None:
         random.seed(exp.seed)

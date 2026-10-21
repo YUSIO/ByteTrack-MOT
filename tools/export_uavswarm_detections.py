@@ -55,6 +55,7 @@ def main():
     p.add_argument("--conf", type=float, default=0.001)
     p.add_argument("--nms", type=float, default=0.7)
     p.add_argument("--tsize", type=int, default=1088)
+    p.add_argument("--use-exp-size", action="store_true", help="Use experiment (H,W), including rectangular input")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--device", default="cuda")
     a = p.parse_args()
@@ -67,7 +68,7 @@ def main():
     model.load_state_dict(state["model"])
     model.head.decode_in_inference = False
     model.to(device)
-    size = (a.tsize, a.tsize)
+    size = tuple(exp.test_size) if a.use_exp_size else (a.tsize, a.tsize)
     names = a.sequences or sorted(x.name for x in (a.data_root / a.split).glob("UAVSwarm-*") if x.is_dir())
     summary = {"checkpoint": str(a.ckpt), "checkpoint_sha256": sha256(a.ckpt), "checkpoint_epoch": int(state.get("start_epoch", -1)),
                "exp_file": a.exp_file, "split": a.split, "test_size": list(size), "conf": a.conf, "nms": a.nms,
