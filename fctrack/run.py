@@ -114,7 +114,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             if readout is None:
                 from fctrack.readout import Readout
                 spec = cell["readouts"][arm["readout"]]
-                readout = Readout(root / spec["fairmot"], root / spec["backbone"], root / spec["head"], device, spec.get("use_template", True), arch=spec.get("arch", "v1"))
+                readout = Readout(root / spec["fairmot"], root / spec["backbone"], root / spec["head"], device, spec.get("use_template", True), arch=spec.get("arch", "v1"),
+                                  exp_file=spec.get("exp_file"))
             readout.begin(data / name)
             fc.readout = readout
         if claim:

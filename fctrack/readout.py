@@ -17,9 +17,11 @@ _FAIRMOT_ROOT = None  # FairMOT's modules are imported once per process: every r
 
 
 class Readout:
-    def __init__(self, fairmot_root, backbone, head, device, use_template=True, cache_frames=48, arch="v1"):
+    def __init__(self, fairmot_root, backbone, head, device, use_template=True, cache_frames=48, arch="v1", exp_file=None):
         """arch v1: Exp129 head; v2: Exp131 head (stride-2 base features, sub-cell offset); v3: Exp134 head (v2 plus a pixel branch on
-        the network input). v2 / v3 need a FairMOT checkout with readout_head_v2 / readout_head_v3."""
+        the network input). v2 / v3 need a FairMOT checkout with readout_head_v2 / readout_head_v3.
+        arch v3y (Exp137): the v3 head on a frozen YOLOX detector; `backbone` is the YOLOX checkpoint and `exp_file` its exp file
+        relative to this ByteTrack checkout; needs a FairMOT checkout with models/readout_yolox.py."""
         here = Path(__file__).resolve().parent  # the fctrack directory is on sys.path when run.py is started as a script;
         sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != here]  # its tracker.py would shadow FairMOT's tracker package
         global _FAIRMOT_ROOT
@@ -41,7 +43,13 @@ class Readout:
             self.V3 = V3
         self.torch, self.R, self.load_frame = torch, R, load_frame
         self.device = torch.device(device)
-        _, self.model, _, _ = E.load_model(Path(backbone), self.device)
+        if arch == "v3y":  # the YOLOX adapter has the v2 / v3 interface (backbone_forward, read_inputs, decode, ReadoutHeadV3)
+            from models import readout_yolox as Y
+            self.V2 = self.V3 = Y
+            self.load_frame = Y.load_frame
+            self.model = Y.load_model(here.parent, exp_file, Path(backbone), self.device)
+        else:
+            _, self.model, _, _ = E.load_model(Path(backbone), self.device)
         self.head = (self.V3.ReadoutHeadV3() if self.V3 else self.V2.ReadoutHeadV2() if self.V2 else R.ReadoutHead()).to(self.device)
         self.head.load_state_dict(torch.load(head, map_location=self.device))
         self.head.eval()
