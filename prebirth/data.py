@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import configparser
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,10 +195,11 @@ class TemporalPatchDataset(Dataset):
 
     Half of patches are centered at a randomly offset target. The other half are
     random native-resolution windows; half of these attempt to find background
-    within that same image. All objects in every crop receive dense supervision.
+    within that same image. An optional train-only hard-negative manifest replaces
+    the background-seeking quarter. All objects in every crop remain supervised.
     """
     def __init__(self, root, split="train", samples=3600, patch_size=320, history_gap=3,
-                 seed=138, augment=True, sequences=None):
+                 seed=138, augment=True, sequences=None, hard_negative_json=None):
         if patch_size < 32 or patch_size % 4:
             raise ValueError("patch_size must be >=32 and divisible by stride 4")
         if history_gap < 1 or samples < 1:
@@ -212,6 +214,65 @@ class TemporalPatchDataset(Dataset):
                                 if np.any(self.sequences[s].labels.get(frame, np.empty((0, 5)))[:, 4] > 0)]
         if not self.positive_frames:
             raise ValueError(f"No valid positive annotations in {split}")
+        self.hard_negative_rows, self.hard_negative_info = [], None
+        if hard_negative_json is not None:
+            if split != "train":
+                raise ValueError("Hard-negative manifests are forbidden for dev sampling")
+            self._load_hard_negatives(Path(hard_negative_json))
+
+    def _load_hard_negatives(self, path):
+        payload = json.loads(path.read_text())
+        metadata, rows = payload["metadata"], payload["rows"]
+        if (metadata.get("status") != "completed" or metadata.get("split") != "train"
+                or metadata.get("test_data_used") is not False
+                or metadata.get("annotation_access") != "supervised_mining_train_half_only"):
+            raise ValueError("Hard-negative metadata must identify completed train-only supervised mining")
+        if not isinstance(rows, list) or not rows or metadata.get("rows") != len(rows):
+            raise ValueError("Hard-negative manifest must contain a nonempty, correctly counted rows list")
+        by_name = {seq.name: (index, seq) for index, seq in enumerate(self.sequences)}
+        sources = {info["sequence"]: info for info in self.source_info}
+        provenance = metadata.get("provenance", {})
+        for name, record in provenance.items():
+            if name not in by_name:
+                raise ValueError(f"Hard-negative sequence absent from training selection: {name}")
+            source = sources[name]
+            if (record.get("sha256", {}).get("gt") != source["gt_sha256"]
+                    or record.get("sha256", {}).get("seqinfo") != source["seqinfo_sha256"]):
+                raise ValueError(f"Hard-negative GT/seqinfo hash mismatch: {name}")
+            bounds = metadata.get("per_sequence", {}).get(name, {})
+            if bounds.get("first_frame") != source["first_frame"] or bounds.get("last_frame") != source["last_frame"]:
+                raise ValueError(f"Hard-negative train-half bounds mismatch: {name}")
+        kinds = {}
+        frames = set()
+        for row_index, row in enumerate(rows):
+            name, frame = row["sequence"], row["frame"]
+            if name not in by_name or name not in provenance:
+                raise ValueError(f"Unverified hard-negative sequence: {name}")
+            sequence_id, seq = by_name[name]
+            if type(frame) is not int or not seq.start <= frame <= seq.end or frame not in seq.frames:
+                raise ValueError(f"Hard-negative frame outside training half: {name}:{frame}")
+            values = np.asarray([row["center_x"], row["center_y"], row["score"], row["nearest_gt_iou"]], float)
+            if (not np.isfinite(values).all() or not 0 <= values[0] < seq.width
+                    or not 0 <= values[1] < seq.height or not 0 <= values[2] <= 1 or not 0 <= values[3] < 1):
+                raise ValueError(f"Invalid hard-negative geometry/score at row {row_index}")
+            box = np.asarray(row["box_xywh"], float)
+            if (box.shape != (4,) or not np.isfinite(box).all() or np.any(box[2:] <= 0)
+                    or not np.allclose(box[:2] + box[2:] / 2, values[:2], atol=1e-4, rtol=0)):
+                raise ValueError(f"Hard-negative box/center mismatch at row {row_index}")
+            kind = row.get("kind", "unknown")
+            if kind not in {"near_object", "far_background"}:
+                raise ValueError(f"Unknown hard-negative category: {kind}")
+            self.hard_negative_rows.append({**row, "sequence_id": sequence_id, "source_row": row_index})
+            kinds[kind] = kinds.get(kind, 0) + 1
+            frames.add((name, frame))
+        self.hard_negative_info = {
+            "path": str(path.resolve()), "sha256": sha256(path), "rows": len(rows),
+            "sequences": len({name for name, _ in frames}), "frames": len(frames), "kinds": kinds,
+            "metadata_split": "train", "mining_source_sha256": metadata.get("mining_source_sha256"),
+            "source_checkpoint_sha256": metadata.get("source_checkpoint_sha256"),
+            "expected_samples_per_epoch": self.samples // 4,
+            "sampling_policy": "uniform manifest-row choice at index%4==3; random crop offset 0.12..0.88 of patch; retain all dense GT",
+        }
 
     def __len__(self):
         return self.samples
@@ -242,11 +303,22 @@ class TemporalPatchDataset(Dataset):
     def __getitem__(self, index):
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, int(index)]))
         target_sample = index % 2 == 0
-        pool = self.positive_frames if target_sample else self.frames
-        sequence_id, frame = pool[int(rng.integers(len(pool)))]
+        hard_negative = None
+        if self.hard_negative_rows and index % 4 == 3:
+            hard_negative = self.hard_negative_rows[int(rng.integers(len(self.hard_negative_rows)))]
+            sequence_id, frame = hard_negative["sequence_id"], hard_negative["frame"]
+        else:
+            pool = self.positive_frames if target_sample else self.frames
+            sequence_id, frame = pool[int(rng.integers(len(pool)))]
         seq = self.sequences[sequence_id]
         labels = seq.labels.get(frame, np.empty((0, 5), np.float32)).copy()
-        x, y = self._origin(rng, seq, labels, target_sample, index % 4 == 3)
+        if hard_negative is None:
+            x, y = self._origin(rng, seq, labels, target_sample, index % 4 == 3)
+        else:
+            size = self.patch_size
+            x = round(hard_negative["center_x"] - rng.uniform(0.12, 0.88) * size)
+            y = round(hard_negative["center_y"] - rng.uniform(0.12, 0.88) * size)
+            x, y = int(np.clip(x, 0, max(0, seq.width - size))), int(np.clip(y, 0, max(0, seq.height - size)))
         history_frames = [max(seq.start, frame - k * self.history_gap) for k in range(3)]
         patches, cache = [], {}
         size = self.patch_size
@@ -288,6 +360,10 @@ class TemporalPatchDataset(Dataset):
         targets["metadata"] = {"sequence": seq.name, "frame": frame,
                                "history_frames": history_frames, "crop_xy": [x, y],
                                "target_sample": target_sample, "flipped": bool(flipped)}
+        if hard_negative is not None:
+            targets["metadata"].update(hard_negative_source_row=hard_negative["source_row"],
+                                       hard_negative_kind=hard_negative["kind"],
+                                       hard_negative_source_score=hard_negative["score"])
         return targets
 
 

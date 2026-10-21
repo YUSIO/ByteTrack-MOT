@@ -188,6 +188,8 @@ def parse_args():
                         help="CUDA autocast precision; gradient scaling is used only with fp16")
     parser.add_argument("--cpu-threads", type=int, default=4)
     parser.add_argument("--sequences", nargs="+", default=None, help="Optional preflight-only sequence subset")
+    parser.add_argument("--hard-negative-json", default=None,
+                        help="Verified train-half mining manifest replacing only the background-seeking quarter")
     parser.add_argument("--log-every", type=int, default=25)
     initialization = parser.add_mutually_exclusive_group()
     initialization.add_argument("--init-checkpoint", default=None, help="Model weights only; reset optimizer/epoch in a new run")
@@ -222,7 +224,9 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     train_set = TemporalPatchDataset(args.root, "train", args.steps_per_epoch * args.batch_size,
-                                    args.patch_size, args.history_gap, args.seed, sequences=args.sequences)
+                                    args.patch_size, args.history_gap, args.seed, sequences=args.sequences,
+                                    hard_negative_json=args.hard_negative_json)
+    args.hard_negative_json_sha256 = train_set.hard_negative_info["sha256"] if train_set.hard_negative_info else None
     dev_set = TemporalPatchDataset(args.root, "dev", args.dev_samples, args.patch_size,
                                   args.history_gap, args.seed + 100000, augment=False, sequences=args.sequences)
     common = dict(num_workers=args.workers, collate_fn=collate_patches, worker_init_fn=seed_worker,
@@ -252,7 +256,7 @@ def main():
             raise ValueError(f"Checkpoint model config {state.get('model_config')} != {expected}")
         model.load_state_dict(state["model"], strict=True)
         if args.resume:
-            for key in ("steps_per_epoch", "batch_size", "patch_size", "history_gap", "seed", "lr", "warmup_epochs", "epochs", "amp", "amp_dtype"):
+            for key in ("steps_per_epoch", "batch_size", "patch_size", "history_gap", "seed", "lr", "warmup_epochs", "epochs", "amp", "amp_dtype", "hard_negative_json_sha256"):
                 if state["args"].get(key) != getattr(args, key):
                     raise ValueError(f"Resume changes {key}; use --init-checkpoint for a new training schedule")
             optimizer.load_state_dict(state["optimizer"])
@@ -278,7 +282,10 @@ def main():
               "precision": {"parameter_dtype": "float32",
                             "autocast_dtype": args.amp_dtype if args.amp and device.type == "cuda" else "float32",
                             "gradient_scaling": bool(use_scaler)},
-              "sampling": "50% target-offset, 25% random, 25% background-seeking; all in-crop centers supervised",
+              "sampling": ("50% target-offset, 25% random, 25% mined-hard-negative; all in-crop centers supervised"
+                           if train_set.hard_negative_info else
+                           "50% target-offset, 25% random, 25% background-seeking; all in-crop centers supervised"),
+              "hard_negative_mining": train_set.hard_negative_info,
               "history_order": [0, -args.history_gap, -2 * args.history_gap],
               "source_xywh_coordinates": "as recorded, no +/-1 conversion", "stride": 4,
               "python_executable": sys.executable, "python_version": platform.python_version(),
@@ -288,6 +295,8 @@ def main():
               "parameters": sum(p.numel() for p in model.parameters())}
     write_json(out / "config.json", config)
     source = {"train": train_set.source_info, "dev": dev_set.source_info,
+              "hard_negative_mining": train_set.hard_negative_info,
+              "hard_negative_sampling_completed_epochs": [],
               "boundary_policy": "history frame=max(split first frame,current-k*gap), never crosses half boundary",
               "validation_sampling": {"seed": args.seed + 100000, "samples": args.dev_samples,
                                       "patch_size": args.patch_size, "epoch": 0}}
@@ -302,6 +311,7 @@ def main():
             train_set.set_epoch(epoch)
             model.train()
             totals, samples, collisions = {}, 0, 0
+            hard_negative_samples, hard_negative_kinds = 0, {}
             epoch_started = time.time()
             for step, batch in enumerate(train_loader):
                 batch = to_device(batch, device)
@@ -320,6 +330,11 @@ def main():
                 n = len(batch["images"])
                 samples += n
                 collisions += batch["collisions"]
+                for sample_metadata in batch["metadata"]:
+                    if "hard_negative_source_row" in sample_metadata:
+                        hard_negative_samples += 1
+                        kind = sample_metadata["hard_negative_kind"]
+                        hard_negative_kinds[kind] = hard_negative_kinds.get(kind, 0) + 1
                 for key, value in values.items():
                     totals[key] = totals.get(key, 0.0) + float(value) * n
                 global_step = epoch * args.steps_per_epoch + step + 1
@@ -333,6 +348,15 @@ def main():
                     writer.add_scalar("train_step/lr", row["lr"], global_step)
             train_metrics = {key: value / samples for key, value in totals.items()}
             train_metrics.update(samples=samples, center_cell_collisions=collisions)
+            if train_set.hard_negative_info:
+                train_metrics.update(hard_negative_samples=hard_negative_samples,
+                                     hard_negative_kind_counts=hard_negative_kinds)
+                expected = train_set.hard_negative_info["expected_samples_per_epoch"]
+                if hard_negative_samples != expected:
+                    raise AssertionError(f"Hard-negative sample count {hard_negative_samples} != expected {expected}")
+                source["hard_negative_sampling_completed_epochs"].append(
+                    {"epoch": epoch + 1, "samples": hard_negative_samples, "kinds": hard_negative_kinds})
+                write_json(out / "source_split.json", source)
             dev_metrics = validate(model, dev_loader, device, args)
             improved = dev_metrics["loss"] < best_loss
             if improved:
@@ -350,7 +374,8 @@ def main():
                        "completed_epochs_this_attempt": len(history), "last_epoch": epoch + 1,
                        "best_epoch": best_epoch, "best_dev_loss": best_loss,
                        "selection": config["selection"], "best_dev": next(r["dev"] for r in history if r["epoch"] == best_epoch),
-                       "last_dev": dev_metrics, "elapsed_seconds": time.time() - started,
+                       "last_dev": dev_metrics, "last_train": train_metrics,
+                       "elapsed_seconds": time.time() - started,
                        "evidence_boundary": "fixed GT-sampled dev patches; not full-frame detector or tracking metrics"}
             write_json(out / "metrics.json", metrics)
             for phase, values in (("train", train_metrics), ("dev", dev_metrics)):
