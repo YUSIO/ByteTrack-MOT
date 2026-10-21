@@ -67,7 +67,7 @@ def calibrated_threshold(scores, quality, written, max_false_reject=.05):
             "actual_false_rejects": int(np.sum(values < threshold))}
 
 
-def fit_predict(x, labels, train, test, seed=140, geometry=None):
+def fit_predict(x, labels, train, test, seed=140, geometry=None, pca_whiten=False, logreg_c=1.):
     """Fit every preprocessing stage exclusively on eligible training rows."""
     labels = np.asarray(labels)
     train = np.asarray(train, int)
@@ -76,6 +76,7 @@ def fit_predict(x, labels, train, test, seed=140, geometry=None):
     meta = {"train_count": int(len(train)), "class_counts":
             {str(v): int(np.sum(y == v)) for v in (0, 1)}, "fallback": None,
             "components": 0, "geometry_dimensions": int(x.shape[1] if geometry is None else geometry.shape[1]),
+            "pca_whiten": bool(pca_whiten), "logreg_c": float(logreg_c), "pca_scale_diagnostic": None,
             "warnings": []}
     if len(np.unique(y)) < 2:
         value = float(np.mean(y)) if len(y) else .5
@@ -83,14 +84,30 @@ def fit_predict(x, labels, train, test, seed=140, geometry=None):
                     constant_score=value)
         return np.full(len(test), value), meta
     components = min(32, x.shape[1], len(train) - 1) if geometry is not None else 0
-    model = LogisticRegression(C=1., max_iter=2000, solver="lbfgs", random_state=seed)
+    model = LogisticRegression(C=logreg_c, max_iter=2000, solver="lbfgs", random_state=seed)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         scaler = StandardScaler().fit(x[train])
         x_train, x_test = scaler.transform(x[train]), scaler.transform(x[test])
         if geometry is not None:
-            pca = PCA(n_components=components, svd_solver="randomized", random_state=seed)
+            pca = PCA(n_components=components, svd_solver="randomized", random_state=seed,
+                      whiten=pca_whiten)
             x_train, x_test = pca.fit_transform(x_train), pca.transform(x_test)
+            raw_sd = np.sqrt(np.maximum(pca.explained_variance_, 0.))
+            output_sd = x_train.std(axis=0)
+            output_mean = x_train.mean(axis=0)
+            safe_sd = np.where(output_sd > np.finfo(float).eps, output_sd, 1.)
+            meta["pca_scale_diagnostic"] = {
+                "raw_pc_train_sd_min": float(raw_sd.min()),
+                "raw_pc_train_sd_max": float(raw_sd.max()),
+                "raw_pc_train_sd_median": float(np.median(raw_sd)),
+                "output_pc_train_sd_min": float(output_sd.min()),
+                "output_pc_train_sd_max": float(output_sd.max()),
+                "test_pc_max_abs": float(np.abs(x_test).max()) if len(test) else None,
+                "test_pc_max_abs_in_train_sd": float(np.abs((x_test - output_mean) / safe_sd).max()) if len(test) else None,
+                "near_constant_output_pc_count": int(np.sum(output_sd <= np.finfo(float).eps)),
+                "purpose": "Covariate-scale diagnostic only; not used for model, threshold or run selection",
+            }
             geometry_scaler = StandardScaler().fit(geometry[train])
             x_train = np.concatenate((geometry_scaler.transform(geometry[train]), x_train), axis=1)
             x_test = np.concatenate((geometry_scaler.transform(geometry[test]), x_test), axis=1)
@@ -209,12 +226,15 @@ def validate_inputs(features, rows):
         raise ValueError("Nested grouped OOF requires at least three distinct sequences")
 
 
-def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=1000):
+def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=1000,
+                   pca_whiten=False, logreg_c=1.):
     validate_inputs(features, rows)
     if outer_folds not in (4, 5):
         raise ValueError("Use four or five outer folds")
     if bootstrap_repeats < 0:
         raise ValueError("bootstrap_repeats must be nonnegative")
+    if not math.isfinite(logreg_c) or logreg_c <= 0:
+        raise ValueError("logreg_c must be finite and positive")
     n = len(rows)
     all_indices = np.arange(n)
     sequence = np.asarray([r["sequence"] for r in rows])
@@ -246,7 +266,8 @@ def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=10
                 else:
                     x = np.asarray(features["X_" + method], float)
                     common = None if method == "geometry" else geometry
-                    test_scores, fit_meta = fit_predict(x, labels, train, test, seed, common)
+                    test_scores, fit_meta = fit_predict(x, labels, train, test, seed, common,
+                                                       pca_whiten=pca_whiten, logreg_c=logreg_c)
                 predictions[head][method][test] = test_scores
                 record = {"outer_fit": fit_meta,
                           "test_class_counts": {str(c): int(np.sum(labels[test] == c)) for c in (-1, 0, 1)},
@@ -260,7 +281,8 @@ def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=10
                         if method == "seed_p":
                             score, fit = raw_p[valid], {"fallback": None, "fit": "raw_p_no_fit"}
                         else:
-                            score, fit = fit_predict(x, labels, inner_train, valid, seed, common)
+                            score, fit = fit_predict(x, labels, inner_train, valid, seed, common,
+                                                    pca_whiten=pca_whiten, logreg_c=logreg_c)
                         inner_scores[valid_local] = score
                         fit_records.append({"fold": inner_id, **fit})
                     if not np.isfinite(inner_scores).all():
@@ -282,6 +304,8 @@ def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=10
               "quality_target": "fixed final-box IoU hit; miss is not a background label",
               "presence_target": "separate auxiliary head; -1 ignored during fitting and metrics",
               "preprocessing": "train-only geometry StandardScaler retaining every scalar; visual StandardScaler + randomized PCA min(32, feature_dim, train_n-1), concatenated with scaled geometry before LR",
+              "pca_whiten": bool(pca_whiten), "logreg_c": float(logreg_c),
+              "scale_diagnostic": "Every fitted visual PCA reports raw/output training PC standard deviations and held-out PC magnitude in training units; diagnostics do not select models or thresholds",
               "shuffled_control": "X_shuffled is a fixed same-query 90-degree residual-path rotation, not shuffled examples or time",
               "common_information_limit": "Single also receives historical runtime geometry; contrasts measure added historical visual information conditional on the same geometry",
               "padding_limit": "Spatial descriptors include border replication; pair masks do not exclude full CNN receptive-field padding. All-path-valid subgroups diagnose coverage effects, not a proof of pure motion evidence",
@@ -289,7 +313,7 @@ def evaluate_probe(features, rows, outer_folds=5, seed=140, bootstrap_repeats=10
               "capacity_limit": "Equal visual dimensions and PCA cap do not imply equal effective rank or PCA weighting; repeated single/fusion slots change covariance weighting",
               "mechanism_limit": "No target-only/background-only ablation; a dual advantage does not establish necessary dual-path interaction",
               "label_limit": "Presence is annotated-centre geometry, not visibility or identity; fixed-box quality does not imply incremental tracking value",
-              "classifier": "LogisticRegression C=1 max_iter=2000 lbfgs; no class reweighting or tuning",
+              "classifier": f"LogisticRegression C={logreg_c:g} max_iter=2000 lbfgs; same C for geometry and visual, no class reweighting or within-run tuning",
               "threshold": "highest observed positive boundary with strict score<threshold and at most floor(.05*N) inner-OOF written true hits rejected",
               "threshold_transfer": "inner OOF cutoff applied unchanged to outer refit; outer 5% constraint is not guaranteed",
               "interpretation": "Frozen-query information probe, not closed-loop MOT or an unbiased untouched-test claim; below_p subgroup is descriptive only"},
@@ -346,6 +370,8 @@ def main(argv=None):
     parser.add_argument("--outer-folds", type=int, choices=(4, 5), default=5)
     parser.add_argument("--seed", type=int, default=140)
     parser.add_argument("--bootstrap-repeats", type=int, default=1000)
+    parser.add_argument("--pca-whiten", action="store_true", help="Whiten retained visual PCs using training-fold variance")
+    parser.add_argument("--logreg-c", type=float, default=1., help="Fixed inverse L2 strength for every LR, including geometry")
     args = parser.parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     names = ("metrics.json", "predictions.jsonl", "folds.json", "summary.csv")
@@ -354,7 +380,8 @@ def main(argv=None):
     with np.load(args.features, allow_pickle=False) as data:
         features = {key: data[key] for key in FEATURE_KEYS}
     rows = [json.loads(line) for line in args.rows.read_text().splitlines() if line.strip()]
-    result, predictions, folds = evaluate_probe(features, rows, args.outer_folds, args.seed, args.bootstrap_repeats)
+    result, predictions, folds = evaluate_probe(features, rows, args.outer_folds, args.seed, args.bootstrap_repeats,
+                                                pca_whiten=args.pca_whiten, logreg_c=args.logreg_c)
     result["provenance"] = {"inputs": {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
                                              for path in (args.features, args.rows)},
                             "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

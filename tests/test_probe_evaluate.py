@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
 
@@ -132,16 +133,50 @@ def test_cli_outputs_are_finite_and_auxiliary_labels_preserved(tmp_path):
             assert not set(fold["test_sequences"]) & set(inner["validation_sequences"])
 
 
+def test_whitening_scale_and_options_reach_every_fit():
+    rng = np.random.default_rng(140)
+    common_signal = rng.normal(size=(64, 1))
+    visual = common_signal + .1 * rng.normal(size=(64, 12))
+    geometry = rng.normal(size=(64, 3))
+    labels = np.arange(64) % 2
+    train, test = np.arange(48), np.arange(48, 64)
+    _, raw = fit_predict(visual, labels, train, test, geometry=geometry)
+    _, white = fit_predict(visual, labels, train, test, geometry=geometry,
+                          pca_whiten=True, logreg_c=.01)
+    assert raw["pca_whiten"] is False and raw["logreg_c"] == 1.
+    assert raw["pca_scale_diagnostic"]["output_pc_train_sd_max"] > 2.
+    expected = np.sqrt((len(train) - 1) / len(train))
+    assert np.isclose(white["pca_scale_diagnostic"]["output_pc_train_sd_min"], expected)
+    assert np.isclose(white["pca_scale_diagnostic"]["output_pc_train_sd_max"], expected)
+    assert white["pca_whiten"] is True and white["logreg_c"] == .01
+    # A stub isolates parameter propagation through both heads and every nested
+    # fit, including the geometry-only arm, without repeating classifier fits.
+    features, rows = fixture_data()
+    calls = []
+    def record_fit(x, y, training, testing, seed=140, geometry=None, **kwargs):
+        calls.append((geometry is None, bool(np.any(y == -1)), kwargs))
+        assert kwargs == {"pca_whiten": True, "logreg_c": .01}
+        return np.full(len(testing), .5), {"fallback": None}
+    with patch("fctrack.probe_evaluate.fit_predict", side_effect=record_fit):
+        metrics, _, folds = evaluate_probe(features, rows, outer_folds=4, bootstrap_repeats=0,
+                                           pca_whiten=True, logreg_c=.01)
+    assert len(calls) == 100  # 4 outer * 5 learned arms * (quality outer+3 inner+presence outer)
+    assert any(is_geometry and is_presence for is_geometry, is_presence, _ in calls)
+    assert metrics["protocol"]["pca_whiten"] is True and metrics["protocol"]["logreg_c"] == .01
+    assert len(folds["folds"]) == 4
+
+
 if __name__ == "__main__":
     tests = (test_strict_cutoff_budget_and_ties,
              test_missing_calibration_class_disables_veto,
              test_group_folds_are_disjoint_and_complete,
              test_constant_fallback_is_explicit_and_presence_ignore_excluded,
-             test_outer_labels_and_features_cannot_leak_into_own_fit_or_cutoff)
+             test_outer_labels_and_features_cannot_leak_into_own_fit_or_cutoff,
+             test_whitening_scale_and_options_reach_every_fit)
     for test in tests:
         test()
         print(f"PASS {test.__name__}", flush=True)
     with tempfile.TemporaryDirectory(prefix="exp140-probe-tests-") as directory:
         test_cli_outputs_are_finite_and_auxiliary_labels_preserved(Path(directory))
     print("PASS test_cli_outputs_are_finite_and_auxiliary_labels_preserved", flush=True)
-    print("All 6 probe evaluation tests passed", flush=True)
+    print("All 7 probe evaluation tests passed", flush=True)
