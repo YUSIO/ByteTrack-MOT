@@ -55,6 +55,7 @@ class FCTrack:
         self.log, self.attempts = log, []
         self.rec, self.out = cfg.get("recover"), cfg.get("outlier")
         self.frame = 0
+        self.trace = None  # Exp148: optional read-only observer; never used for decisions
         self.point_provider = None  # Exp147: optional causal image correspondence; default keeps A unchanged
         self.snap = {}     # frame -> {track id: centre} of the members observed (or recovered) in that frame
         self.meta = {}     # track id -> last real frame, number of real observations, last box, outlier state
@@ -81,7 +82,13 @@ class FCTrack:
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
         self.frame += 1
         f, (H, W) = self.frame, shape
+        trace = self.trace
+        if trace is not None:
+            trace.begin(f)
+            trace.record("pre_byte", pools=trace.pools(self.t, self.meta), detections_xyxy_score=det)
         outs = self.t.update(det.copy(), shape, shape)
+        if trace is not None:
+            trace.record("post_byte", pools=trace.pools(self.t, self.meta), output_uids=[trace.uid(t) for t in outs])
         rows, cur = [], {}
         for t in outs:
             box = np.asarray(t._det if t.frame_id == f else t.tlwh, float)
@@ -115,7 +122,12 @@ class FCTrack:
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         if self.relab:
+            if trace is not None:
+                before_relabel = [dict(uid=trace.uid(t), row_id=tid, object_id=t.track_id) for tid, _, _, t in rows]
             self.relabel_births(f, rows)
+            if trace is not None:
+                trace.record("relabel", before=before_relabel,
+                             after=[dict(uid=trace.uid(t), row_id=tid, object_id=t.track_id) for tid, _, _, t in rows])
             self.hist[f] = {}
             for tid, box, _, _ in rows:
                 if box[2] * box[3] > 0:
@@ -130,6 +142,10 @@ class FCTrack:
         if self.head is not None:  # pseudo-labels from the rows actually written in this frame
             written = [r for r in rows if r[1][2] * r[1][3] > 0]
             self.head.collect(f, det, written, lambda b: self.features.at((self.seq, f), image, b), iou_matrix)
+        if trace is not None:
+            trace.record("final", pools=trace.pools(self.t, self.meta),
+                         rows=[dict(uid=trace.uid(t), track_id=tid, tlwh=box, score=score) for tid, box, score, t in rows])
+            trace.finish()
         return [(tid, box, score) for tid, box, score, _ in rows]
 
     def birth(self, f, det, rows, image):
@@ -138,6 +154,7 @@ class FCTrack:
         IoU >= 0.5 a GT member no written row matches, ceiling only). A ByteTrack track started on the same box in this
         frame (unconfirmed, not written) is activated instead of starting a second one. Highest score first."""
         b = self.bth
+        trace = self.trace
         if not len(det):
             return []
         written = [r for r in rows if r[1][2] * r[1][3] > 0]
@@ -145,6 +162,9 @@ class FCTrack:
         tlwh = np.column_stack((det[:, :2], det[:, 2:4] - det[:, :2])).astype(float)
         cover = iou_matrix(tlwh, taken).max(1) if len(taken) else np.zeros(len(tlwh))
         sel = np.flatnonzero((det[:, 4] >= b["lo"]) & (det[:, 4] < b["hi"]) & (cover < b["cover_iou"]))
+        if trace is not None:
+            trace.record("birth_selection", selected_detection_indices=sel, cover=cover,
+                         lo=b["lo"], hi=b["hi"], cover_iou=b["cover_iou"], rule=b["rule"])
         if self.log_birth_low is not None and b.get("log_lo") is not None:  # Exp124: record the lower band, decide nothing
             low = np.flatnonzero((det[:, 4] >= b["log_lo"]) & (det[:, 4] < b["lo"]) & (cover < b["cover_iou"]))
             if len(low):
@@ -158,6 +178,9 @@ class FCTrack:
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            if trace is not None:
+                trace.record("birth_verification", detection_indices=sel, proposals=tlwh[sel], p=p,
+                             regressed=reg, final=final[sel], accepted=ok, p_min=b["p_min"])
             sel = sel[ok]
         elif b["rule"] in ("policy", "all_logged"):
             # Exp115: every uncovered candidate >= lo is scored by the verifier; the written box is the regressed one (as
@@ -188,6 +211,8 @@ class FCTrack:
         for k in sel[np.argsort(-det[sel, 4])]:
             box = final[k]
             if len(taken) and iou_matrix(box, taken).max() >= b["cover_iou"]:
+                if trace is not None:
+                    trace.record("birth_decision", detection_index=int(k), final=box, decision="final_overlap")
                 continue
             same = [t for t in self.t.tracked_stracks if not t.is_activated and t.frame_id == f
                     and iou_matrix(tlwh[k], t.tlwh).max() >= 0.7]
@@ -206,6 +231,9 @@ class FCTrack:
             self.snap.setdefault(f, {})[t.track_id] = box[:2] + box[2:] / 2
             taken = np.vstack((taken, box))
             added.append([t.track_id, box.copy(), det[k, 4], t])
+            if trace is not None:
+                trace.record("birth_decision", detection_index=int(k), final=box, decision="written",
+                             reused_unconfirmed=bool(same), track=trace.track(t, self.meta))
             if b["rule"] in ("policy", "all_logged"):
                 self.birth_log.append({"frame": f, "score": float(det[k, 4]), "p": pmap[int(k)], "box": box.copy(), "t": t})
             self.stats["born"] += 1
@@ -278,6 +306,7 @@ class FCTrack:
 
     def recover(self, f, det, cur, W, H, image):
         r = self.rec
+        trace = self.trace
         cur_boxes = np.array(list(cur.values())).reshape(-1, 4)
         usable = det[det[:, 4] > 0.1]
         usable_tlwh = np.column_stack((usable[:, :2], usable[:, 2:4] - usable[:, :2])) if len(usable) else np.zeros((0, 4))
@@ -285,6 +314,25 @@ class FCTrack:
         for t in self.t.lost_stracks:
             m = self.meta.get(t.track_id)
             gap = f - t.frame_id
+            if trace is not None:
+                reasons = []
+                if m is None:
+                    reasons.append("missing_meta")
+                if not t.is_activated:
+                    reasons.append("not_activated")
+                if not 1 <= gap <= r["lookback"]:
+                    reasons.append("gap_outside_lookback")
+                if m is not None:
+                    if f - m["real"] > r["max_since_real"]:
+                        reasons.append("since_real_exceeded")
+                    if m["obs"] < r["min_observations"]:
+                        reasons.append("too_few_observations")
+                    if m.get("prov", 0) > 0:
+                        reasons.append("birth_probation")
+                trace.record("recovery_eligibility", track=trace.track(t, self.meta), gap=gap,
+                             since_real=None if m is None else f - m["real"], reasons=reasons,
+                             eligible=not reasons, lookback=r["lookback"], max_since_real=r["max_since_real"],
+                             min_observations=r["min_observations"])
             if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
                 continue
             if m.get("prov", 0) > 0:  # Exp111: provisional (verifier-born, not yet confirmed again by the detector)
@@ -294,11 +342,20 @@ class FCTrack:
             for spec in r["estimator"].split("+"):  # "a+b": both positions are tried, the better verified one is kept
                 for est in spec.split("|"):         # "a|b": b only when a has no answer (no neighbour)
                     got = self.position(t, m, est, cur, size)
+                    if trace is not None:
+                        trace.record("recovery_position", uid=trace.uid(t), track_id=t.track_id, slot=spec,
+                                     requested_estimator=est, result=None if got is None else dict(centre=got[0], used=got[1]))
                     if got is not None:
                         break
                 if got is None or not (0 <= got[0][0] < W and 0 <= got[0][1] < H):
+                    if trace is not None:
+                        trace.record("recovery_proposal", uid=trace.uid(t), track_id=t.track_id, slot=spec,
+                                     decision="no_position" if got is None else "outside_image")
                     continue
                 cands.append((t, np.r_[got[0] - size / 2, size], got[1]))
+                if trace is not None:
+                    trace.record("recovery_proposal", uid=trace.uid(t), track_id=t.track_id, slot=spec,
+                                 proposal=cands[-1][1], used=got[1], decision="proposed")
         if not cands:
             return []
         self.stats["proposals_before_overlap"] += len(cands)
@@ -310,6 +367,11 @@ class FCTrack:
             keep &= iou_matrix(boxes, cur_boxes).max(1) < r["iou_free"]
         if r["skip_if_detected"] and len(usable_tlwh):  # the detector already has a box there: leave it to the association
             keep &= iou_matrix(boxes, usable_tlwh).max(1) < r["iou_free"]
+        if trace is not None:
+            trace.record("recovery_prefilter", candidates=[dict(track=trace.track(t, self.meta), proposal=b, estimator=e)
+                                                          for t, b, e in cands],
+                         keep=keep, current_boxes=cur_boxes, usable_detection_boxes=usable_tlwh,
+                         iou_free=r["iou_free"], skip_if_detected=r["skip_if_detected"])
         cands, boxes = [c for c, k in zip(cands, keep) if k], boxes[keep]
         self.stats["tried"] += len(cands)
         if not cands:
@@ -322,6 +384,10 @@ class FCTrack:
                 final = boxes
         else:
             p, final = np.ones(len(cands)), boxes
+        if trace is not None:
+            trace.record("recovery_verification", candidates=[dict(track=trace.track(t, self.meta), proposal=b, estimator=e)
+                                                             for t, b, e in cands],
+                         p=p, final=final, p_min=r["p_min"])
         if self.log:  # state before any decision of this frame (re-activation below changes frame_id and covariance)
             pre = [(f - t.frame_id, f - self.meta[t.track_id]["real"], self.meta[t.track_id]["obs"],
                     float(t.covariance[0, 0]), float(t.covariance[1, 1])) for t, _, _ in cands]
@@ -347,6 +413,10 @@ class FCTrack:
                 added.append([t.track_id, final[i].copy(), float(r["score"]), t])
             self.stats["recovered"] += 1
             self.stats["recovered_" + cands[i][2]] += 1
+        if trace is not None:
+            trace.record("recovery_decision", candidates=[dict(uid=trace.uid(t), track_id=t.track_id, proposal=prop,
+                                                              final=final[i], p=p[i], estimator=used, decision=decision[i])
+                                                         for i, (t, prop, used) in enumerate(cands)])
         if self.log:
             for i, (t, prop, used) in enumerate(cands):
                 gap, since_real, obs, cxx, cyy = pre[i]

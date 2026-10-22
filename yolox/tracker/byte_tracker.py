@@ -190,6 +190,7 @@ class BYTETracker(object):
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
+        trace = getattr(self, "decision_trace", None)
         activated_starcks = []
         refind_stracks = []
         lost_stracks = []
@@ -215,6 +216,13 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+        if trace is not None:
+            high_indices, low_indices = np.flatnonzero(remain_inds), np.flatnonzero(inds_second)
+            trace.record("detection_bands", boxes_xyxy=bboxes, scores=scores,
+                         high_indices=high_indices, low_indices=low_indices,
+                         ignored_indices=np.flatnonzero(~(remain_inds | inds_second)),
+                         track_thresh=self.args.track_thresh, low_thresh=0.1,
+                         birth_thresh=self.det_thresh, max_time_lost=self.max_time_lost)
 
         if len(dets) > 0:
             '''Detections'''
@@ -268,6 +276,9 @@ class BYTETracker(object):
         if homa is None and not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        if trace is not None:
+            trace.association("association_high", strack_pool, detections, high_indices, dists,
+                              matches, u_track, u_detection, self.args.match_thresh)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -291,8 +302,17 @@ class BYTETracker(object):
         k = getattr(self.args, "low_score_lost", 0)
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked
                              or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
+        if trace is not None:
+            eligible_objects = set(r_tracked_stracks)
+            trace.record("low_eligibility", low_score_lost=k,
+                         tracks=[dict(track=trace.track(strack_pool[i]), eligible=strack_pool[i] in eligible_objects,
+                                      reason="eligible" if strack_pool[i] in eligible_objects else "state_or_lost_age",
+                                      age=self.frame_id - strack_pool[i].end_frame) for i in u_track])
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
+        if trace is not None:
+            trace.association("association_low", r_tracked_stracks, detections_second, low_indices, dists,
+                              matches, u_track, u_detection_second, 0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
@@ -310,11 +330,16 @@ class BYTETracker(object):
                 lost_stracks.append(track)
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
+        if trace is not None:
+            remaining_high_indices = high_indices[list(u_detection)]
         detections = [detections[i] for i in u_detection]
         dists = matching.iou_distance(unconfirmed, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
+        if trace is not None:
+            trace.association("association_unconfirmed", unconfirmed, detections, remaining_high_indices, dists,
+                              matches, u_unconfirmed, u_detection, 0.7)
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
             activated_starcks.append(unconfirmed[itracked])
@@ -327,12 +352,21 @@ class BYTETracker(object):
         for inew in u_detection:
             track = detections[inew]
             if track.score < self.det_thresh:
+                if trace is not None:
+                    trace.record("byte_birth", detection_index=int(remaining_high_indices[inew]),
+                                 score=track.score, decision="below_det_thresh")
                 continue
             track.activate(self.kalman_filter, self.frame_id)
             activated_starcks.append(track)
+            if trace is not None:
+                trace.record("byte_birth", detection_index=int(remaining_high_indices[inew]),
+                             track=trace.track(track), decision="activated")
         """ Step 5: Update state"""
         for track in self.lost_stracks:
             if self.frame_id - track.end_frame > self.max_time_lost:
+                if trace is not None:
+                    trace.record("byte_remove", track=trace.track(track), reason="max_time_lost",
+                                 age=self.frame_id - track.end_frame, max_time_lost=self.max_time_lost)
                 track.mark_removed()
                 removed_stracks.append(track)
 
@@ -345,7 +379,11 @@ class BYTETracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
+        if trace is not None:
+            duplicate_before = trace.pools(self)
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        if trace is not None:
+            trace.record("byte_deduplicate", before=duplicate_before, after=trace.pools(self))
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 

@@ -36,7 +36,7 @@ ATTEMPT_COLUMNS = ("frame,track_id,gap,since_real,obs,estimator,prop_x,prop_y,pr
                    "final_x,final_y,final_w,final_h,p,decision,cov_x,cov_y")
 
 
-def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, queries_dir=None):
+def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, queries_dir=None, decisions_dir=None):
     wrap_stracks(STrack)
     verify = None
     if arm.get("verifier"):
@@ -82,6 +82,9 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        if decisions_dir is not None:
+            from fctrack.decision_trace import DecisionTrace
+            fc.trace = tracker.decision_trace = DecisionTrace(decisions_dir / f"{name}.jsonl.gz")
         if arm.get("cotracker"):
             from fctrack.visual_correspondence import VisualCorrespondence
             fc.point_provider = VisualCorrespondence(arm["cotracker"], data / name, raw, device,
@@ -139,6 +142,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
                 x, y, w, h = box
                 if w * h > 0:
                     rows.append("{},{},{},{},{},{},{},-1,-1,-1\n".format(frame, tid, round(x, 1), round(y, 1), round(w, 1), round(h, 1), round(score, 2)))
+        if fc.trace is not None:
+            fc.trace.close()
         if queries_dir is not None:
             queries_dir.mkdir(parents=True, exist_ok=True)
             (queries_dir / f"{name}.csv").write_text("kind,frame,x,y,w,h,p,rx,ry,rw,rh\n" + "".join(
@@ -189,6 +194,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="smoke test only: the first k sequences")
     ap.add_argument("--log-attempts", action="store_true", help="write one csv row per verified fill-in attempt to <output>/attempts/<arm>/")
     ap.add_argument("--log-queries", action="store_true", help="Exp124: write every verifier query (fill, birth, birth_low) to <output>/queries/<arm>/")
+    ap.add_argument("--log-decisions", action="store_true", help="Exp148: observational state and gate JSONL to <output>/decisions/<arm>/")
     a = ap.parse_args()
     root = a.root.resolve()
     cfg = json.loads(a.config.read_text())
@@ -201,7 +207,8 @@ def main():
         tracks = out / "tracks" / arm_name
         names, stats, digests = run_arm(root, cfg, cell, arm, tracks, a.device, a.limit,
                                         out / "attempts" / arm_name if a.log_attempts else None,
-                                        out / "queries" / arm_name if a.log_queries else None)
+                                        out / "queries" / arm_name if a.log_queries else None,
+                                        out / "decisions" / arm_name if a.log_decisions else None)
         e = evaluate(root / cell["dataset_root"], cell["split"], tracks, out / "metrics" / f"{arm_name}.json", names)
         m, h = e["overall"]["motmetrics"], e["overall"]["hota"]
         overall = {"MOTA": m["mota"], "IDF1": m["idf1"], "HOTA": h["HOTA"], "DetA": h["DetA"], "AssA": h["AssA"],
