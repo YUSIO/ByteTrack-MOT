@@ -8,6 +8,7 @@ import configparser
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,7 +68,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
     if attempts_dir is not None:
         attempts_dir.mkdir(parents=True, exist_ok=False)
     stats, digests = {}, {}
+    shared_predictor = None
+    arm_start = time.perf_counter()
     for name in names:
+        seq_start = time.perf_counter()
         info = seq_info(data / name)
         shape = (info["imHeight"], info["imWidth"])
         raw = np.loadtxt(root / cell["detections"] / name / "det.txt", delimiter=",", ndmin=2)
@@ -78,6 +82,11 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        if arm.get("cotracker"):
+            from fctrack.visual_correspondence import VisualCorrespondence
+            fc.point_provider = VisualCorrespondence(arm["cotracker"], data / name, raw, device,
+                                                     predictor=shared_predictor)
+            shared_predictor = fc.point_provider.predictor
         if arm.get("birth", {}).get("rule") == "oracle":  # Exp109 ceiling only: the oracle birth rule reads the GT
             g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
             g = g[g[:, 6] >= 1]
@@ -145,11 +154,21 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             bdir.mkdir(parents=True, exist_ok=True)
             (bdir / f"{name}.csv").write_text("frame,score,p,x,y,w,h,id\n" + "".join(
                 "{},{:.5f},{:.6f},{:.2f},{:.2f},{:.2f},{:.2f},{}\n".format(e["frame"], e["score"], e["p"], *e["box"], e["id"]) for e in fc.birth_log))
+        if fc.point_provider is not None:
+            pd = tracks.parent.parent / "point_queries" / tracks.name
+            pd.mkdir(parents=True, exist_ok=True)
+            (pd / f"{name}.json").write_text(json.dumps({"stats": fc.point_provider.stats,
+                                                       "queries": fc.point_provider.records}, indent=1) + "\n")
+            for k, v in fc.point_provider.stats.items():
+                if isinstance(v, (int, float)):
+                    stats["point_" + k] = stats.get("point_" + k, 0) + v
+        print("sequence", tracks.name, name, "seconds", round(time.perf_counter() - seq_start, 3), flush=True)
         for k, v in fc.stats.items():
             stats[k] = stats.get(k, 0) + v
         if claim:
             for k, v in fc.head.stats.items():
                 stats["head_" + k] = stats.get("head_" + k, 0) + v
+    stats["tracking_wall_seconds"] = time.perf_counter() - arm_start
     return names, stats, digests
 
 

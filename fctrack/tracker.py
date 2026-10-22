@@ -55,6 +55,7 @@ class FCTrack:
         self.log, self.attempts = log, []
         self.rec, self.out = cfg.get("recover"), cfg.get("outlier")
         self.frame = 0
+        self.point_provider = None  # Exp147: optional causal image correspondence; default keeps A unchanged
         self.snap = {}     # frame -> {track id: centre} of the members observed (or recovered) in that frame
         self.meta = {}     # track id -> last real frame, number of real observations, last box, outlier state
         if not self.out:
@@ -87,6 +88,11 @@ class FCTrack:
             rows.append([t.track_id, box, t.score, t])  # the score keeps its dtype so that the written text matches the stored baseline
             if t.frame_id == f:
                 cur[t.track_id] = box
+                if self.point_provider is not None:
+                    # Only BYTETracker's detector-updated outputs are anchors. Recovery
+                    # can overwrite meta.box; never pair that box with an older real frame.
+                    t._visual_anchor_frame = f
+                    t._visual_anchor_box = box.copy()
                 m = self.meta.setdefault(t.track_id, {"obs": 0, "outlier": False, "ok": 0, "cleared": False})
                 m.update(real=f, obs=m["obs"] + 1, box=box)
                 if m.get("prov", 0) > 0 and m["real"] == f and m["obs"] > 1:  # Exp111: a real detection after the birth frame
@@ -295,6 +301,9 @@ class FCTrack:
                 cands.append((t, np.r_[got[0] - size / 2, size], got[1]))
         if not cands:
             return []
+        self.stats["proposals_before_overlap"] += len(cands)
+        unique = {(id(t), *map(float, b)) for t, b, _ in cands}
+        self.stats["unique_proposals_before_overlap"] += len(unique)
         boxes = np.array([b for _, b, _ in cands])
         keep = np.ones(len(cands), bool)
         if len(cur_boxes):  # never on top of a member that is being tracked
@@ -348,6 +357,11 @@ class FCTrack:
     def position(self, t, m, est, cur, size):
         """Centre of the missing member under one estimator, with the name of what was used; None when it has no answer."""
         r = self.rec
+        if est == "cotracker":
+            if self.point_provider is None:
+                raise ValueError("cotracker estimator requires a point provider")
+            centre = self.point_provider(self.frame, t)
+            return None if centre is None else (centre, "cotracker")
         if est == "kalman":
             return t.tlwh[:2] + t.tlwh[2:] / 2, "kalman"
         if est == "hold":
