@@ -1,6 +1,6 @@
 """Run FCTrack arms on frozen detection caches and evaluate them with the pinned evaluator.
 
-The association is the unmodified ByteTrack of this checkout and always consumes the detector's boxes and scores.
+Association defaults to ByteTrack; joint_association enables the explicit Exp146 fixed-cache adapter.
 An arm without `recover` and `outlier` is the default ByteTrack. Ground truth is read only by the evaluator.
 """
 import argparse
@@ -75,6 +75,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         if arm.get("gmc"):  # Exp074: frame-to-frame camera motion estimated beforehand (Exp055 estimator), row `f a b tx c d ty`
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             targs["gmc_warps"] = {int(r[0]): r[1:].reshape(2, 3) for r in w}
+        if arm.get("joint_association"):
+            targs["joint_association"] = arm["joint_association"]
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
@@ -145,6 +147,8 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             bdir.mkdir(parents=True, exist_ok=True)
             (bdir / f"{name}.csv").write_text("frame,score,p,x,y,w,h,id\n" + "".join(
                 "{},{:.5f},{:.6f},{:.2f},{:.2f},{:.2f},{:.2f},{}\n".format(e["frame"], e["score"], e["p"], *e["box"], e["id"]) for e in fc.birth_log))
+        for k, v in getattr(tracker, "joint_stats", {}).items():
+            stats["joint_" + k] = stats.get("joint_" + k, 0) + v
         for k, v in fc.stats.items():
             stats[k] = stats.get(k, 0) + v
         if claim:

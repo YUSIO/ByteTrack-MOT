@@ -253,61 +253,89 @@ class BYTETracker(object):
         if warp is not None:
             STrack.multi_gmc(strack_pool, warp)
             STrack.multi_gmc(unconfirmed, warp)
-        # Default 'iou' is upstream ByteTrack; 'm2da' follows HOMATracker Eqs. (9)-(13).
-        first_stage_cost = getattr(self.args, 'first_stage_cost', 'iou')
-        if homa is not None:
-            dists = homa.cost(strack_pool, detections)
-        elif first_stage_cost == 'iou':
-            dists = matching.iou_distance(strack_pool, detections)
-        elif first_stage_cost == 'm2da':
-            for track in strack_pool:
-                track.record_prediction(self.args.m2da_window - 1)
-            dists = matching.m2da_distance(strack_pool, detections, self.args.m2da_kappa)
+        joint = getattr(self.args, 'joint_association', None)
+        if joint is not None:
+            if homa is not None or getattr(self.args, 'first_stage_cost', 'iou') != 'iou':
+                raise ValueError('joint association requires the frozen IoU baseline')
+            from .joint_association import assign
+            detections_second = [STrack(STrack.tlbr_to_tlwh(b), s)
+                                 for b, s in zip(dets_second, scores_second)]
+            all_detections = detections + detections_second
+            matches, u_track, u_all = assign(strack_pool, detections, detections_second, self.args, joint)
+            self.joint_stats = getattr(self, 'joint_stats', {})
+            for itracked, idet in matches:
+                track, det = strack_pool[itracked], all_detections[idet]
+                kind = ('lost' if track.state == TrackState.Lost else 'tracked') + ('_low' if idet >= len(detections) else '_high')
+                self.joint_stats[kind] = self.joint_stats.get(kind, 0) + 1
+                if track.state == TrackState.Tracked:
+                    track.update(det, self.frame_id)
+                    activated_starcks.append(track)
+                else:
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
+            for it in u_track:
+                track = strack_pool[it]
+                if track.state == TrackState.Tracked:
+                    track.mark_lost()
+                    lost_stracks.append(track)
+            # Preserve ByteTrack unconfirmed confirmation and birth: only unused high boxes.
+            u_detection = [i for i in u_all if i < len(detections)]
         else:
-            raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
-        if homa is None and not self.args.mot20:
-            dists = matching.fuse_score(dists, detections)
-        matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
-
-        for itracked, idet in matches:
-            track = strack_pool[itracked]
-            det = detections[idet]
-            if track.state == TrackState.Tracked:
-                track.update(detections[idet], self.frame_id)
-                activated_starcks.append(track)
+            # Default 'iou' is upstream ByteTrack; 'm2da' follows HOMATracker Eqs. (9)-(13).
+            first_stage_cost = getattr(self.args, 'first_stage_cost', 'iou')
+            if homa is not None:
+                dists = homa.cost(strack_pool, detections)
+            elif first_stage_cost == 'iou':
+                dists = matching.iou_distance(strack_pool, detections)
+            elif first_stage_cost == 'm2da':
+                for track in strack_pool:
+                    track.record_prediction(self.args.m2da_window - 1)
+                dists = matching.m2da_distance(strack_pool, detections, self.args.m2da_kappa)
             else:
-                track.re_activate(det, self.frame_id, new_id=False)
-                refind_stracks.append(track)
+                raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
+            if homa is None and not self.args.mot20:
+                dists = matching.fuse_score(dists, detections)
+            matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
-        ''' Step 3: Second association, with low score detection boxes'''
-        # association the untrack to the low score detections
-        if len(dets_second) > 0:
-            '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
-        else:
-            detections_second = []
-        # Exp070 diagnostic (off by default): tracks lost for at most `low_score_lost` frames also take low score boxes
-        k = getattr(self.args, "low_score_lost", 0)
-        r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked
-                             or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
-        dists = matching.iou_distance(r_tracked_stracks, detections_second)
-        matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
-        for itracked, idet in matches:
-            track = r_tracked_stracks[itracked]
-            det = detections_second[idet]
-            if track.state == TrackState.Tracked:
-                track.update(det, self.frame_id)
-                activated_starcks.append(track)
+            for itracked, idet in matches:
+                track = strack_pool[itracked]
+                det = detections[idet]
+                if track.state == TrackState.Tracked:
+                    track.update(detections[idet], self.frame_id)
+                    activated_starcks.append(track)
+                else:
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
+
+            ''' Step 3: Second association, with low score detection boxes'''
+            # association the untrack to the low score detections
+            if len(dets_second) > 0:
+                '''Detections'''
+                detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
+                              (tlbr, s) in zip(dets_second, scores_second)]
             else:
-                track.re_activate(det, self.frame_id, new_id=False)
-                refind_stracks.append(track)
+                detections_second = []
+            # Exp070 diagnostic (off by default): tracks lost for at most `low_score_lost` frames also take low score boxes
+            k = getattr(self.args, "low_score_lost", 0)
+            r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked
+                                 or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
+            dists = matching.iou_distance(r_tracked_stracks, detections_second)
+            matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
+            for itracked, idet in matches:
+                track = r_tracked_stracks[itracked]
+                det = detections_second[idet]
+                if track.state == TrackState.Tracked:
+                    track.update(det, self.frame_id)
+                    activated_starcks.append(track)
+                else:
+                    track.re_activate(det, self.frame_id, new_id=False)
+                    refind_stracks.append(track)
 
-        for it in u_track:
-            track = r_tracked_stracks[it]
-            if not track.state == TrackState.Lost:
-                track.mark_lost()
-                lost_stracks.append(track)
+            for it in u_track:
+                track = r_tracked_stracks[it]
+                if not track.state == TrackState.Lost:
+                    track.mark_lost()
+                    lost_stracks.append(track)
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
         detections = [detections[i] for i in u_detection]
