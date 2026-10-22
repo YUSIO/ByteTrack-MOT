@@ -48,6 +48,8 @@ def parse_args():
     parser.add_argument("--topology-kmax", type=int, default=8)
     parser.add_argument("--topology-alpha", type=float, default=0.6)
     parser.add_argument("--topology-lambda", type=float, default=0.30)
+    parser.add_argument("--first-metric", choices=("iou", "diou", "legacy_diou"), default="iou")
+    parser.add_argument("--topology-version", choices=("paper", "legacy"), default="paper")
     parser.add_argument("--mot20", action="store_true")
     return parser.parse_args()
 
@@ -145,6 +147,8 @@ def main():
             "match_thresh": args.match_thresh,
             "min_box_area": args.min_box_area,
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
+            "first_metric": args.first_metric,
+            "topology_version": args.topology_version,
             "topology": args.topology,
             "topology_kmin": args.topology_kmin,
             "topology_kmax": args.topology_kmax,

@@ -18,7 +18,8 @@ def _clone_topology(topology):
     return np.asarray(topology, dtype=np.float32).copy()
 
 
-def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2):
+def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2, version="paper"):
+    """Paper Eq. 4-8; legacy preserves Exp014 for controlled replay."""
     """Build per-detection local topology descriptors.
 
     Each descriptor contains rows ``[normalized_distance, sin(theta),
@@ -34,6 +35,9 @@ def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2):
     centers = np.column_stack(
         ((boxes[:, 0] + boxes[:, 2]) * 0.5, (boxes[:, 1] + boxes[:, 3]) * 0.5)
     ).astype(np.float32)
+    pairwise = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
+    nonzero = pairwise[pairwise > 0]
+    frame_scale = float(nonzero.mean()) if nonzero.size else 1.0
     descriptors = []
     for index, center in enumerate(centers):
         delta = centers - center
@@ -47,7 +51,7 @@ def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2):
             continue
 
         selected_distances = distances[order]
-        scale = max(float(np.max(selected_distances)), 1e-6)
+        scale = max(float(np.max(selected_distances)), 1e-6) if version == "legacy" else frame_scale
         selected_delta = delta[order]
         safe_distances = np.maximum(selected_distances, 1e-6)
         descriptors.append(
@@ -62,7 +66,7 @@ def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2):
     return descriptors
 
 
-def local_topology_cost(track_topology, detection_topology, alpha=0.6):
+def local_topology_cost(track_topology, detection_topology, alpha=0.6, version="paper"):
     """Compare two local topology descriptors with Hungarian matching."""
     if track_topology is None or detection_topology is None:
         return None
@@ -80,14 +84,18 @@ def local_topology_cost(track_topology, detection_topology, alpha=0.6):
         track_topology[:, None, 1:3] * detection_topology[None, :, 1:3], axis=2
     )
     direction_cost = 0.5 * (1.0 - np.clip(direction_dot, -1.0, 1.0))
+    if version != "legacy":
+        direction_cost = np.linalg.norm(track_topology[:, None, 1:3] - detection_topology[None, :, 1:3], axis=2) / 2.0
     pair_cost = alpha * distance_cost + (1.0 - alpha) * direction_cost
 
     rows, columns = linear_sum_assignment(pair_cost)
+    if version != "legacy":
+        return float(np.clip(pair_cost[rows, columns].mean() + 0.1 * abs(len(track_topology) - len(detection_topology)), 0.0, 1.0))
     unmatched = max(len(track_topology), len(detection_topology)) - len(rows)
     return float((pair_cost[rows, columns].sum() + unmatched) / max(len(track_topology), len(detection_topology)))
 
 
-def topology_fused_cost(iou_cost, tracks, detections, alpha=0.6, topology_lambda=0.30):
+def topology_fused_cost(iou_cost, tracks, detections, alpha=0.6, topology_lambda=0.30, version="paper"):
     """Fuse topology with IoU only where both local descriptors are valid."""
     fused = np.asarray(iou_cost, dtype=np.float32).copy()
     if fused.size == 0:
@@ -99,6 +107,7 @@ def topology_fused_cost(iou_cost, tracks, detections, alpha=0.6, topology_lambda
                 getattr(track, "topology", None),
                 getattr(detection, "topology", None),
                 alpha=alpha,
+                version=version,
             )
             if topology_cost is None:
                 continue
@@ -110,7 +119,7 @@ def topology_fused_cost(iou_cost, tracks, detections, alpha=0.6, topology_lambda
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score, topology=None):
+    def __init__(self, tlwh, score, topology=None, topology_version="paper"):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -120,11 +129,12 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.topology_version = topology_version
         self.topology = _clone_topology(topology)
         self.topology_frame_id = None
 
     def update_topology(self, topology, frame_id):
-        if topology is not None:
+        if topology is not None or getattr(self, "topology_version", "paper") != "legacy":
             self.topology = _clone_topology(topology)
             self.topology_frame_id = frame_id
 
@@ -264,6 +274,8 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        self.topology_version = getattr(args, "topology_version", "paper")
+        self.first_metric = getattr(args, "first_metric", "iou")
         self.topology_enabled = bool(getattr(args, "topology", False))
         self.topology_kmax = int(getattr(args, "topology_kmax", 8))
         self.topology_kmin = int(getattr(args, "topology_kmin", 2))
@@ -299,6 +311,7 @@ class BYTETracker(object):
                 bboxes[inds_low],
                 max_neighbors=self.topology_kmax,
                 min_neighbors=self.topology_kmin,
+                version=self.topology_version,
             )
             topology_by_detection_index = {
                 int(index): descriptor
@@ -319,6 +332,7 @@ class BYTETracker(object):
                     STrack.tlbr_to_tlwh(tlbr),
                     score,
                     topology=topology_by_detection_index.get(int(index)),
+                    topology_version=self.topology_version,
                 )
                 for index, tlbr, score in zip(detection_indices, dets, scores_keep)
             ]
@@ -338,7 +352,10 @@ class BYTETracker(object):
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
-        dists = matching.iou_distance(strack_pool, detections)
+        if self.first_metric == "iou":
+            dists = matching.iou_distance(strack_pool, detections)
+        else:
+            dists = matching.diou_distance(strack_pool, detections, legacy_continuous=self.first_metric == "legacy_diou")
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
@@ -363,6 +380,7 @@ class BYTETracker(object):
                     STrack.tlbr_to_tlwh(tlbr),
                     score,
                     topology=topology_by_detection_index.get(int(index)),
+                    topology_version=self.topology_version,
                 )
                 for index, tlbr, score in zip(
                     detection_indices_second, dets_second, scores_second
@@ -379,6 +397,7 @@ class BYTETracker(object):
                 detections_second,
                 alpha=self.topology_alpha,
                 topology_lambda=self.topology_lambda,
+                version=self.topology_version,
             )
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
