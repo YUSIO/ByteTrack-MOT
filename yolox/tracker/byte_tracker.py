@@ -19,8 +19,7 @@ def _clone_topology(topology):
 
 
 def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2, version="paper"):
-    """Paper Eq. 4-8; legacy preserves Exp014 for controlled replay."""
-    """Build per-detection local topology descriptors.
+    """Paper Eq. 4-8; legacy preserves Exp014 for controlled replay.
 
     Each descriptor contains rows ``[normalized_distance, sin(theta),
     cos(theta)]`` for the nearest detections in the same frame.  The
@@ -54,12 +53,15 @@ def build_local_topologies(boxes, max_neighbors=8, min_neighbors=2, version="pap
         scale = max(float(np.max(selected_distances)), 1e-6) if version == "legacy" else frame_scale
         selected_delta = delta[order]
         safe_distances = np.maximum(selected_distances, 1e-6)
+        theta = np.arctan2(selected_delta[:, 1], selected_delta[:, 0])
+        sin_theta = selected_delta[:, 1] / safe_distances if version == "legacy" else np.sin(theta)
+        cos_theta = selected_delta[:, 0] / safe_distances if version == "legacy" else np.cos(theta)
         descriptors.append(
             np.column_stack(
                 (
                     selected_distances / scale,
-                    selected_delta[:, 1] / safe_distances,
-                    selected_delta[:, 0] / safe_distances,
+                    sin_theta,
+                    cos_theta,
                 )
             ).astype(np.float32)
         )
