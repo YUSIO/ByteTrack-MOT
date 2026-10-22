@@ -278,11 +278,42 @@ class BYTETracker(object):
         self.kalman_filter = KalmanFilter()
         self.topology_version = getattr(args, "topology_version", "paper")
         self.first_metric = getattr(args, "first_metric", "iou")
+        self.geometry = getattr(args, "geometry", "hybrid")
+        self.first_score_fusion = getattr(args, "first_score_fusion", "on") == "on" and not args.mot20
+        self.audit_first = bool(getattr(args, "audit_first", False))
+        self.first_audit = {k: 0 for k in ("frames", "pairs", "raw_order_violations", "fused_order_violations", "iou_eligible", "diou_eligible", "iou_matches", "iou_matches_rejected_by_diou", "shadow_changed_frames", "raw_iou_sum", "raw_diou_sum", "fused_iou_sum", "fused_diou_sum")}
+        self.first_audit_examples = []
         self.topology_enabled = bool(getattr(args, "topology", False))
         self.topology_kmax = int(getattr(args, "topology_kmax", 8))
         self.topology_kmin = int(getattr(args, "topology_kmin", 2))
         self.topology_alpha = float(getattr(args, "topology_alpha", 0.6))
         self.topology_lambda = float(getattr(args, "topology_lambda", 0.30))
+
+    def audit_first_costs(self, tracks, detections):
+        """Read-only shadow assignments on the SAME predicted state; never use GT."""
+        raw_iou = matching.iou_distance(tracks, detections, geometry=self.geometry)
+        raw_diou = matching.diou_distance(tracks, detections, geometry=self.geometry)
+        a = matching.fuse_score(raw_iou, detections) if self.first_score_fusion else raw_iou
+        b = matching.fuse_score(raw_diou, detections) if self.first_score_fusion else raw_diou
+        threshold = self.args.match_thresh
+        ma, _, _ = matching.linear_assignment(a, threshold)
+        mb, _, _ = matching.linear_assignment(b, threshold)
+        sa = set(map(tuple, ma)); sb = set(map(tuple, mb))
+        rejected = [(int(i), int(j)) for i, j in ma if b[i, j] > threshold]
+        values = dict(frames=1, pairs=a.size,
+            raw_order_violations=int(np.sum(raw_diou < raw_iou - 1e-12)),
+            fused_order_violations=int(np.sum(b < a - 1e-12)),
+            iou_eligible=int(np.sum(a <= threshold)), diou_eligible=int(np.sum(b <= threshold)),
+            iou_matches=len(ma), iou_matches_rejected_by_diou=len(rejected),
+            shadow_changed_frames=int(sa != sb), raw_iou_sum=float(raw_iou.sum()),
+            raw_diou_sum=float(raw_diou.sum()), fused_iou_sum=float(a.sum()), fused_diou_sum=float(b.sum()))
+        for key, value in values.items():
+            self.first_audit[key] += value
+        if rejected and len(self.first_audit_examples) < 3:
+            self.first_audit_examples.append(dict(frame=self.frame_id, rejected=[dict(
+                track_id=int(tracks[i].track_id), detection_index=j,
+                prediction=tracks[i].tlbr.tolist(), detection=detections[j].tlbr.tolist(),
+                score=float(detections[j].score), iou_cost=float(a[i,j]), diou_cost=float(b[i,j])) for i,j in rejected]))
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -355,11 +386,19 @@ class BYTETracker(object):
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
         if self.first_metric == "iou":
-            dists = matching.iou_distance(strack_pool, detections)
+            dists = matching.iou_distance(strack_pool, detections, geometry=self.geometry)
         else:
-            dists = matching.diou_distance(strack_pool, detections, legacy_continuous=self.first_metric == "legacy_diou")
-        if not self.args.mot20:
+            dists = matching.diou_distance(strack_pool, detections, legacy_continuous=self.first_metric == "legacy_diou", geometry=self.geometry)
+        if self.first_score_fusion:
             dists = matching.fuse_score(dists, detections)
+        if self.first_metric == "diou_gate":
+            # Diagnostic intervention: DIoU eligibility, IoU assignment objective.
+            iou_cost = matching.iou_distance(strack_pool, detections, geometry=self.geometry)
+            if self.first_score_fusion:
+                iou_cost = matching.fuse_score(iou_cost, detections)
+            dists = np.where(dists <= self.args.match_thresh, iou_cost, np.inf)
+        if self.audit_first:
+            self.audit_first_costs(strack_pool, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
@@ -391,7 +430,7 @@ class BYTETracker(object):
         else:
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
-        dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        dists = matching.iou_distance(r_tracked_stracks, detections_second, geometry=self.geometry)
         if self.topology_enabled:
             dists = topology_fused_cost(
                 dists,
@@ -420,7 +459,7 @@ class BYTETracker(object):
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
         detections = [detections[i] for i in u_detection]
-        dists = matching.iou_distance(unconfirmed, detections)
+        dists = matching.iou_distance(unconfirmed, detections, geometry=self.geometry)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
@@ -454,7 +493,7 @@ class BYTETracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
-        self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
+        self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks, geometry=self.geometry)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
@@ -486,8 +525,8 @@ def sub_stracks(tlista, tlistb):
     return list(stracks.values())
 
 
-def remove_duplicate_stracks(stracksa, stracksb):
-    pdist = matching.iou_distance(stracksa, stracksb)
+def remove_duplicate_stracks(stracksa, stracksb, geometry="hybrid"):
+    pdist = matching.iou_distance(stracksa, stracksb, geometry=geometry)
     pairs = np.where(pdist < 0.15)
     dupa, dupb = list(), list()
     for p, q in zip(*pairs):

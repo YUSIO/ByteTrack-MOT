@@ -50,7 +50,7 @@ def linear_assignment(cost_matrix, thresh):
     return matches, unmatched_a, unmatched_b
 
 
-def ious(atlbrs, btlbrs):
+def ious(atlbrs, btlbrs, geometry="hybrid"):
     """
     Compute cost based on IoU
     :type atlbrs: list[tlbr] | np.ndarray
@@ -62,6 +62,15 @@ def ious(atlbrs, btlbrs):
     if ious.size == 0:
         return ious
 
+    if geometry == "continuous":
+        a = np.asarray(atlbrs, dtype=float).reshape(-1, 4)
+        b = np.asarray(btlbrs, dtype=float).reshape(-1, 4)
+        wh = np.maximum(0.0, np.minimum(a[:, None, 2:], b[None, :, 2:]) - np.maximum(a[:, None, :2], b[None, :, :2]))
+        intersection = wh.prod(axis=2)
+        area_a = np.maximum(0.0, a[:, 2:] - a[:, :2]).prod(axis=1)
+        area_b = np.maximum(0.0, b[:, 2:] - b[:, :2]).prod(axis=1)
+        union = area_a[:, None] + area_b[None, :] - intersection
+        return np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
     ious = bbox_ious(
         np.ascontiguousarray(atlbrs, dtype=float),
         np.ascontiguousarray(btlbrs, dtype=float)
@@ -70,7 +79,7 @@ def ious(atlbrs, btlbrs):
     return ious
 
 
-def iou_distance(atracks, btracks):
+def iou_distance(atracks, btracks, geometry="hybrid"):
     """
     Compute cost based on IoU
     :type atracks: list[STrack]
@@ -85,12 +94,12 @@ def iou_distance(atracks, btracks):
     else:
         atlbrs = [track.tlbr for track in atracks]
         btlbrs = [track.tlbr for track in btracks]
-    _ious = ious(atlbrs, btlbrs)
+    _ious = ious(atlbrs, btlbrs, geometry)
     cost_matrix = 1 - _ious
 
     return cost_matrix
 
-def dious(atlbrs, btlbrs, legacy_continuous=False):
+def dious(atlbrs, btlbrs, legacy_continuous=False, geometry="hybrid"):
     """Compute pairwise Distance-IoU similarity for ``tlbr`` boxes.
 
     DIoU augments IoU with the normalized squared center distance inside the
@@ -124,7 +133,8 @@ def dious(atlbrs, btlbrs, legacy_continuous=False):
     enclosing_y1 = np.minimum(a[:, None, 1], b[None, :, 1])
     enclosing_x2 = np.maximum(a[:, None, 2], b[None, :, 2])
     enclosing_y2 = np.maximum(a[:, None, 3], b[None, :, 3])
-    enclosing_diagonal = (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2
+    endpoint = 1.0 if geometry == "pixel" else 0.0
+    enclosing_diagonal = (enclosing_x2 - enclosing_x1 + endpoint) ** 2 + (enclosing_y2 - enclosing_y1 + endpoint) ** 2
     penalty = np.divide(
         center_distance,
         enclosing_diagonal,
@@ -132,11 +142,11 @@ def dious(atlbrs, btlbrs, legacy_continuous=False):
         where=enclosing_diagonal > 0,
     )
     if not legacy_continuous:
-        iou = ious(a, b)  # Hold ByteTrack pixel-inclusive IoU fixed.
+        iou = ious(a, b, geometry)
     return iou - penalty
 
 
-def diou_distance(atracks, btracks, legacy_continuous=False):
+def diou_distance(atracks, btracks, legacy_continuous=False, geometry="hybrid"):
     """Compute cost as ``1 - DIoU`` for tracks/detections or ``tlbr`` arrays."""
     if (len(atracks) > 0 and isinstance(atracks[0], np.ndarray)) or (
         len(btracks) > 0 and isinstance(btracks[0], np.ndarray)
@@ -146,7 +156,7 @@ def diou_distance(atracks, btracks, legacy_continuous=False):
     else:
         atlbrs = [track.tlbr for track in atracks]
         btlbrs = [track.tlbr for track in btracks]
-    return 1.0 - dious(atlbrs, btlbrs, legacy_continuous)
+    return 1.0 - dious(atlbrs, btlbrs, legacy_continuous, geometry)
 
 
 def v_iou_distance(atracks, btracks):

@@ -33,4 +33,43 @@ class PaperEquations(unittest.TestCase):
         self.assertAlmostEqual(matching.dious(a,b,True)[0,0],1/3-1/13)
         self.assertEqual(matching.dious(a,[]).shape,(1,0))
 
+    def test_consistent_coordinate_geometry(self):
+        a=np.array([[0,0,2,2]],float); b=np.array([[1,0,3,2]],float)
+        self.assertAlmostEqual(matching.dious(a,b,geometry="pixel")[0,0],.5-1/25)
+        self.assertAlmostEqual(matching.dious(a,b,geometry="continuous")[0,0],1/3-1/13)
+        # Inclusive endpoints equal expanding each box by half a pixel on each side.
+        expand=np.array([-.5,-.5,.5,.5])
+        np.testing.assert_allclose(matching.dious(a,b,geometry="pixel"), matching.dious(a+expand,b+expand,geometry="continuous"))
+        np.testing.assert_allclose(matching.iou_distance(a,b,geometry="continuous"),[[2/3]])
+        np.testing.assert_allclose(matching.iou_distance(a,b,geometry="pixel"),[[.5]])
+
+    def test_score_fusion_and_gate(self):
+        from types import SimpleNamespace
+        detections=[SimpleNamespace(score=.8)]
+        # IoU .2, penalty .1: IoU cost .84 survives .9; DIoU cost .92 fails.
+        iou=matching.fuse_score(np.array([[.8]]),detections)
+        diou=matching.fuse_score(np.array([[.9]]),detections)
+        np.testing.assert_allclose(iou,[[.84]])
+        np.testing.assert_allclose(diou,[[.92]])
+        self.assertEqual(len(matching.linear_assignment(iou,.9)[0]),1)
+        self.assertEqual(len(matching.linear_assignment(diou,.9)[0]),0)
+        self.assertEqual(len(matching.linear_assignment(diou,.99)[0]),1)
+        # Negative DIoU stays negative in similarity; no hidden clipping or /2.
+        self.assertAlmostEqual(matching.fuse_score(np.array([[1.3]]),detections)[0,0],1.24)
+        # LAPJV jointly optimizes matching and unmatched penalties, not Hungarian+filter.
+        cost=np.array([[.1,.8],[.8,1.1]])
+        matched=matching.linear_assignment(cost,.9)[0]
+        self.assertEqual(set(map(tuple,matched)),{(0,0)})
+
+    def test_shadow_cost_order(self):
+        from types import SimpleNamespace
+        rng=np.random.default_rng(143)
+        xy=rng.uniform(-20,20,(20,2)); wh=rng.uniform(.1,30,(20,2))
+        boxes=np.column_stack([xy,xy+wh]); dets=[SimpleNamespace(score=s) for s in rng.uniform(.6,1,20)]
+        for geometry in ("hybrid","continuous","pixel"):
+            a=matching.iou_distance(boxes,boxes[::-1],geometry=geometry)
+            b=matching.diou_distance(boxes,boxes[::-1],geometry=geometry)
+            self.assertTrue(np.all(b>=a-1e-12))
+            self.assertTrue(np.all(matching.fuse_score(b,dets)>=matching.fuse_score(a,dets)-1e-12))
+
 if __name__=='__main__': unittest.main()

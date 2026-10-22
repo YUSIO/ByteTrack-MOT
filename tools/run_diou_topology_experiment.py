@@ -20,9 +20,10 @@ def main():
             for p in [seq/'seqinfo.ini',seq/'gt/gt.txt',cache/seq.name/'det.txt']:
                 inputs[str(p.relative_to(root))]=sha(p)
         track=[sys.executable,str(repo/'tools/track_uavswarm_detections.py'),'--dataset-root',str(dataset),'--detections-root',str(cache),'--split','test','--output-dir',str(out/'track_results')]
-        for k,v in spec['tracker'].items(): track += ['--'+k.replace('_','-'),str(v)]
+        for k,v in {**spec['tracker'], **run.get('overrides', {})}.items(): track += ['--'+k.replace('_','-'),str(v)]
         track+=['--first-metric',run['first_metric'],'--topology-version',run.get('topology_version','paper')]
         if run['topology']: track+=['--topology']
+        if run.get('audit_first'): track+=['--audit-first']
         evaluate=[sys.executable,str(repo/'tools/evaluate_uavswarm_mot.py'),'--dataset-root',str(dataset),'--split','test','--tracker-results',str(out/'track_results'),'--output',str(out/'metrics.json')]
         (out/'command.txt').write_text('PYTHONPATH='+shlex.quote(str(repo))+' '+shlex.join(track)+'\n'+'PYTHONPATH='+shlex.quote(str(repo))+' '+shlex.join(evaluate)+'\n')
         manifest={'phase':'track_eval','status':'running','started_utc':now(),'run':run,'private_repository':'git@github.com:YUSIO/ByteTrack-MOT.git','branch':'exp/143-diou-topology-fidelity','commit':commit,'base_commit':'5e0d0c68d5b1e67b107c2202db885b533769d9dd','code_dirty':False,'python_executable':sys.executable,'python_version':sys.version,'platform':platform.platform(),'hostname':platform.node(),'seed':'not applicable; deterministic','device':'CPU','threads':1,'dependencies':{n:importlib.metadata.version(n) for n in ['numpy','scipy','torch','lap','motmetrics','trackeval']},'config':spec,'input_sha256':inputs,'evaluator_sha256':sha(repo/'tools/evaluate_uavswarm_mot.py'),'evaluator':'motmetrics CLEAR/ID IoU0.5 + TrackEval HOTA, GT/results union','visualization':'derived after metric comparison','detector_not_rerun':True}

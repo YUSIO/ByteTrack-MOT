@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run unmodified ByteTrack association on UAVSwarm MOT-format detection files.
+"""Run configurable ByteTrack association on UAVSwarm MOT-format detection files.
 
 The source detection files are already in original-image coordinates.  Passing
 the original image shape as both ``img_info`` and ``img_size`` preserves a
 unit coordinate scale in ``BYTETracker.update``.  Aside from the NumPy-2
-compatibility aliases replaced in the fork, association and lifecycle logic are
-from the pinned upstream ByteTrack revision.
+compatibility aliases replaced in the fork, the default path preserves pinned ByteTrack behavior. Explicit flags select
+Exp143 paper-guided methods or diagnostic interventions.
 """
 
 import argparse
@@ -48,8 +48,12 @@ def parse_args():
     parser.add_argument("--topology-kmax", type=int, default=8)
     parser.add_argument("--topology-alpha", type=float, default=0.6)
     parser.add_argument("--topology-lambda", type=float, default=0.30)
-    parser.add_argument("--first-metric", choices=("iou", "diou", "legacy_diou"), default="iou")
+    parser.add_argument("--first-metric", choices=("iou", "diou", "legacy_diou", "diou_gate"), default="iou")
     parser.add_argument("--topology-version", choices=("paper", "legacy"), default="paper")
+    parser.add_argument("--geometry", choices=("hybrid", "continuous", "pixel"), default="hybrid",
+                        help="hybrid: inclusive IoU/continuous diagonal; continuous: all association continuous; pixel: all inclusive.")
+    parser.add_argument("--first-score-fusion", choices=("on", "off"), default="on")
+    parser.add_argument("--audit-first", action="store_true")
     parser.add_argument("--mot20", action="store_true")
     return parser.parse_args()
 
@@ -125,6 +129,8 @@ def track_sequence(sequence_dir, output_dir, args):
 
     write_sequence_results(output_dir / f"{info['name']}.txt", result_rows)
     return {
+        "first_audit": tracker.first_audit if args.audit_first else None,
+        "first_audit_examples": tracker.first_audit_examples if args.audit_first else None,
         "input_detection_rows": input_count,
         "output_tracking_rows": len(result_rows),
         "sequence": info["name"],
@@ -155,6 +161,9 @@ def main():
             "topology_alpha": args.topology_alpha,
             "topology_lambda": args.topology_lambda,
             "mot20": args.mot20,
+            "geometry": args.geometry,
+            "first_score_fusion": args.first_score_fusion,
+            "audit_first": args.audit_first,
         },
         "detections_root": str(args.detections_root) if args.detections_root else None,
         "sequences": summaries,
