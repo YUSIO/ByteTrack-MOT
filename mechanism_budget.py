@@ -51,11 +51,11 @@ class AuditA(FCTrack):
    self.stats['relabelled']+=1;self.count['identity_relinks']+=1
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--root',type=Path,required=True);ap.add_argument('--run',required=True);ap.add_argument('--smoke',action='store_true');a=ap.parse_args();B=a.root;E=B/'experiments/exp157_mechanism_gain_budget';W=Path(__file__).resolve().parent;R=E/('preflight' if a.smoke else 'results')/a.run
+ ap=argparse.ArgumentParser();ap.add_argument('--root',type=Path,required=True);ap.add_argument('--run',required=True);ap.add_argument('--smoke',action='store_true');ap.add_argument('--protocol',default='actions.json');a=ap.parse_args();B=a.root;E=B/'experiments/exp157_mechanism_gain_budget';W=Path(__file__).resolve().parent;R=E/('preflight' if a.smoke else 'results')/a.run
  git=lambda *x:subprocess.check_output(['git','-C',str(W),*x],text=True).strip()
- assert not git('status','--porcelain');cfg=json.loads((E/'configs/base.json').read_text());prot=json.loads((E/'configs/actions.json').read_text());cell=cfg['cells']['new_x'];D=B/cell['dataset_root']/'test';cache=B/cell['detections'];REF=B/'experiments/exp156_full_a_decision_audit/reference';names=sorted(p.name for p in cache.glob('UAVSwarm-*'));names=names[:2] if a.smoke else names;assert a.smoke or len(names)==36
+ assert not git('status','--porcelain');cfg=json.loads((E/'configs/base.json').read_text());prot=json.loads((E/'configs'/a.protocol).read_text());cell=cfg['cells']['new_x'];D=B/cell['dataset_root']/'test';cache=B/cell['detections'];REF=B/'experiments/exp156_full_a_decision_audit/reference';names=sorted(p.name for p in cache.glob('UAVSwarm-*'));names=names[:2] if a.smoke else names;assert a.smoke or len(names)==36
  torch.set_num_threads(1);torch.manual_seed(157);np.random.seed(157);cv2.setNumThreads(1);device=torch.device('cuda:1');assert torch.cuda.is_available();weight=B/cell['verifiers']['seed']['weights'];model=load('seed',weight,device);model.eval()
- inputs={str(p.relative_to(B)):sha(p) for p in [weight,E/'configs/base.json',E/'configs/actions.json',W/'mechanism_budget.py']}
+ inputs={str(p.relative_to(B)):sha(p) for p in [weight,E/'configs/base.json',E/'configs'/a.protocol,W/'mechanism_budget.py']}
  detmeta=json.loads((cache/'export_summary.json').read_text());gtmeta=json.loads((B/'experiments/exp141_bytetrack_yolox_x_uavswarmv1/results/run_003/metrics.json').read_text())
  for n in names:
   dp=cache/n/'det.txt';assert sha(dp)==next(s['det_sha256'] for s in detmeta['sequences'] if s['sequence']==n);assert sha(D/n/'gt/gt.txt')==gtmeta['gt_sha256'][n]
@@ -107,7 +107,7 @@ def main():
        b=np.asarray(rows[rowmap[t.track_id]][1]);ov=float(iou_matrix([b],tg[:,2:6])[0,0])
        if ov>=.5:continue
        t.mean,t.covariance=old['pred'][0].copy(),old['pred'][1].copy();t._det=old['box'].copy();fc.meta[t.track_id]=copy.deepcopy(old['meta']);fc.snap.get(f,{}).pop(t.track_id,None);guarded.add(t);fc.count['state_writes_blocked']+=1;fc.events.append(dict(frame=f,kind='state_guard',id=t.track_id,owner=old['owner'],iou=ov))
-     if arm in ['location','location_native','joint']:
+     if arm in ['location','location_quality','location_native','joint']:
       seeds=[];mapping=[];eligible=[]
       for t,old in before.items():
        j=rowmap.get(t.track_id);m=fc.meta.get(t.track_id)
@@ -130,8 +130,8 @@ def main():
        if arm!='location_native':
         if len(tg)!=1:continue
         currentiou=float(iou_matrix([rows[j][1]],tg[:,2:6])[0,0]) if j is not None else 0.
-        if currentiou>=.5:continue
-        qs=[x for x in qs if label(x[1],g)==old['owner']]
+        if arm!='location_quality' and currentiou>=.5:continue
+        qs=[x for x in qs if label(x[1],g)==old['owner'] and (arm!='location_quality' or float(iou_matrix([x[1]],tg[:,2:6])[0,0])>currentiou+1e-9)]
         qs.sort(key=lambda x:float(iou_matrix([x[1]],tg[:,2:6])[0,0]),reverse=True)
        else:qs.sort(key=lambda x:x[0],reverse=True)
        for p,b,origin in qs:
@@ -149,7 +149,7 @@ def main():
       m=fc.meta.get(t.track_id)
       if t.frame_id==f and m and m['real']==f:
        b=getattr(t,'_det',t.tlwh);owners[t].append((f,label(b,g)))
-       if arm in ['location','location_native','joint']:
+       if arm in ['location','location_quality','location_native','joint']:
         x,y,w,h=b;xa=max(0,int(x));ya=max(0,int(y));xb=min(shape[1],int(np.ceil(x+w)));yb=min(shape[0],int(np.ceil(y+h)))
         if xb-xa>=2 and yb-ya>=2:templates[t]=gray()[ya:yb,xa:xb].copy()
      for pid,b,score in rows:
