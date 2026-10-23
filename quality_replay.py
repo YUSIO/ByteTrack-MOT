@@ -58,8 +58,11 @@ def main():
  torch.set_num_threads(1);qmodel=None
  if 'learned' in prot['arms']:
   qmodel=QualityNet().to('cuda:1');qmodel.load_state_dict(torch.load(B/prot['checkpoint'],map_location='cuda:1',weights_only=True));qmodel.eval()
+  if prot.get('audit_blind_labels'):
+   globals()['label']=lambda b,g:None
  torch.set_num_threads(1);torch.manual_seed(157);np.random.seed(157);cv2.setNumThreads(1);device=torch.device('cuda:1');assert torch.cuda.is_available();weight=B/cell['verifiers']['seed']['weights'];model=load('seed',weight,device);model.eval()
  inputs={str(p.relative_to(B)):sha(p) for p in [weight,E/'configs/base.json',E/'configs'/a.protocol,W/'quality_replay.py',W/'box_quality.py']}
+ if qmodel is not None:inputs[str(B/prot['checkpoint'])]=sha(B/prot['checkpoint'])
  detmeta=json.loads((cache/'export_summary.json').read_text());gtmeta=json.loads((B/'experiments/exp141_bytetrack_yolox_x_uavswarmv1/results/run_003/metrics.json').read_text())
  for n in names:
   dp=cache/n/'det.txt';assert sha(dp)==next(s['det_sha256'] for s in detmeta['sequences'] if s['sequence']==n);assert sha(D/n/'gt/gt.txt')==(gtmeta['gt_sha256'][n] if split=='test' else sha(D/n/'gt/gt.txt'))
@@ -149,7 +152,12 @@ def main():
          samples.append((packed[0],packed[1],y.astype(np.float32),f,t.track_id,j is None));continue
         score=quality_scores(qmodel,packed)
         fc.count['quality_pairs']+=1
-        if not(score[1]>=.5 and score[1]> (score[0] if j is not None else 0.)+prot.get('margin',0.)):continue
+        accept=bool(score[1]>=.5 and score[1]>(score[0] if j is not None else 0.)+prot.get('margin',0.))
+        # Post-hoc labels are recorded only after the GT-free decision has been made.
+        target=g[g[:,1]==old['owner']] if old['owner'] is not None else np.empty((0,gt.shape[1]))
+        iy=iou_matrix([original,candidate],target[:,2:6])[:,0].tolist() if len(target)==1 else [None,None]
+        fc.events.append(dict(frame=f,kind='quality_decision',id=t.track_id,q=score.tolist(),owner=old['owner'],same_owner_iou=iy,candidate_owner=label(candidate,g),accepted_by_quality=accept,was_missing=j is None))
+        if not accept:continue
        if arm not in ['location_native','location_current_native','learned']:
         if len(tg)!=1:continue
         currentiou=float(iou_matrix([rows[j][1]],tg[:,2:6])[0,0]) if j is not None else 0.
