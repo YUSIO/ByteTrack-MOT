@@ -41,7 +41,9 @@ def main():
      x,y,w,h=box
      if w*h>0:rows.append('{},{},{},{},{},{},{},-1,-1,-1\n'.format(frame,tid,round(x,1),round(y,1),round(w,1),round(h,1),round(score,2)))
    fc.trace.close();assert all(used[k]==len(v) for k,v in q.items()),n;out=R/'tracks'/f'{n}.txt';out.write_text(''.join(rows));assert out.read_bytes()==(E/'reference/tracks/A'/f'{n}.txt').read_bytes(),n;reg[n]={'byte_identical':True,'query_rows':sum(used.values()),'max_query_coordinate_error':err[0],'frames':info['seqLength'],'rows':len(rows)};print(n,reg[n],flush=True)
-  dump(R/'regression.json',reg);result=evaluate(D,'test',R/'tracks',R/'metrics.json',names);ref=json.loads((E/'reference/metrics/A.json').read_text());assert result==ref,'canonical regression failed'
+  dump(R/'regression.json',reg);result=evaluate(D,'test',R/'tracks',R/'metrics.json',names);ref=json.loads((E/'reference/metrics/A.json').read_text());assert result['overall']['motmetrics']==ref['overall']['motmetrics'],'CLEAR/ID regression failed'
+  assert all(result['per_sequence'][n]['motmetrics']==ref['per_sequence'][n]['motmetrics'] for n in names),'per-sequence CLEAR/ID regression failed'
+  dump(R/'metric_regression.json',{'clear_id_exact':True,'hota_exact':result==ref,'hota_overall_reference':ref['overall']['hota'],'hota_overall_replay':result['overall']['hota'],'boundary':'Identical output bytes; HOTA cross-runtime discrepancy retained, not a method gain.'})
   spec=importlib.util.spec_from_file_location('pinned',ROOT/'tools/evaluate_uavswarm_mot.py');ev=importlib.util.module_from_spec(spec);spec.loader.exec_module(ev);ev.mm.lap.default_solver='lap'
   for n in names:
    acc=ev.mm.utils.compare_to_groundtruth(ev.mm.io.loadtxt(str(D/'test'/n/'gt/gt.txt'),fmt='mot15-2D',min_confidence=1),ev.mm.io.loadtxt(str(R/'tracks'/f'{n}.txt'),fmt='mot15-2D',min_confidence=-1),'iou',distth=.5)
