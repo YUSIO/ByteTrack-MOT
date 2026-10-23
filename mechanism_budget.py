@@ -111,6 +111,8 @@ def main():
       seeds=[];mapping=[];eligible=[]
       for t,old in before.items():
        j=rowmap.get(t.track_id);m=fc.meta.get(t.track_id)
+       if j is not None and objects.get(t.track_id) is not t:
+        fc.count['relabel_replaced_root_skipped']+=1;continue
        if j is None and not(t in fc.t.lost_stracks and t.state==TrackState.Lost and m and 1<=f-t.frame_id<=5 and f-m['real']<=30):continue
        eligible.append(t);b=np.asarray(rows[j][1] if j is not None else t.tlwh,float);pb=boxmean(old['pred'][0]);candidates=[('current',b)] if arm in ['location_quality_current','location_current_native'] else [('current',b),('prediction',pb)]
        if t in templates and arm not in ['location_quality_current','location_current_native','location_quality_no_corr']:
