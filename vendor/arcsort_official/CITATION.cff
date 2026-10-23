@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use ARC-SORT, please cite the paper below."
+title: "ARC-SORT"
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/Athlitix/arcsort"
+authors:
+  - family-names: Adari
+    given-names: Girish Kumar
+    affiliation: Athlitix Inc.
+preferred-citation:
+  type: article
+  title: "ARC-SORT: Adaptive, Robust, Compensated Multi-Object Tracking with Interacting Multiple Models"
+  authors:
+    - family-names: Adari
+      given-names: Girish Kumar
+      affiliation: Athlitix Inc.
+  journal: "arXiv preprint arXiv:2610.22306"
+  year: 2026
+  url: "https://arxiv.org/abs/2610.22306"
+  identifiers:
+    - type: other
+      value: "arXiv:2610.22306"

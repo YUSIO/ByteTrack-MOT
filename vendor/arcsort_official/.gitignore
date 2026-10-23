@@ -1,0 +1,46 @@
+# Virtual environments
+.venv/
+venv/
+arcsort-env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# Weights and datasets (downloaded separately, see README)
+weights/
+data/
+
+# External repos (cloned separately, see README)
+external/
+
+# Model files
+*.pt
+*.pth
+*.pth.tar
+*.onnx
+*.engine
+
+# Reproduction inputs/outputs (see README)
+cache/
+outputs/
+detections/
+results/
+*.zip
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

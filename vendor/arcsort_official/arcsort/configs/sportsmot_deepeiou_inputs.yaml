@@ -1,0 +1,68 @@
+# ARC-SORT on Deep-EIoU's released SportsMOT detections and embeddings
+# (paper: 80.31 HOTA, +3.1 over Deep-EIoU on identical inputs).
+# Same as sportsmot.yaml except the detector-calibration thresholds, which
+# match Deep-EIoU's detector: track_high 0.5, new_track 0.6, match 0.2.
+tracker:
+  name: ARC-SORT SportsMOT
+  track_high_thresh: 0.5
+  track_low_thresh: 0.1
+  new_track_thresh: 0.6
+  track_buffer: 30
+  match_thresh: 0.2
+  byte_match_thresh: 0.5
+  min_hits: 3
+  use_byte: true
+  use_cmc: true
+  use_imm: true
+  use_hybrid_distance: false
+  use_eiou: true
+  use_reid: true
+  use_gated_reid: false
+  use_mahalanobis_gate: false
+  eiou:
+    adaptive: true
+    adaptive_scale: 2.0
+    min_expansion: 0.2
+    max_expansion: 1.2
+  reid:
+    weights: weights/sportsmot/sports_osnet_traced.pt
+    crop_size:
+    - 128
+    - 256
+    w_assoc_emb: 1.25
+    alpha_fixed_emb: 0.95
+    aw_off: false
+    aw_param: 1.0
+    imm_gate_cv_thresh: 0.7
+    imm_gate_young_frames: 5
+  imm:
+    models:
+    - cv
+    - ca
+    - ct
+    transition_prob_diagonal: 0.98
+    process_noise_cv: 1.0
+    process_noise_ca: 1.0
+    process_noise_ct: 1.0
+    initial_model_probs:
+    - 0.7
+    - 0.15
+    - 0.15
+  hybrid_distance:
+    iou_fallback_thresh: 0.1
+    shape_penalty_weight: 0.3
+  cmc:
+    max_corners: 1000
+    quality_level: 0.01
+    min_distance: 1
+    block_size: 3
+    ransac_threshold: 3.0
+    min_inliers: 10
+    downscale: 2
+  ocsort:
+    use_oru: true
+    use_ocm: true
+    use_ocr: true
+    use_cmc_oru: true
+    delta_t: 3
+    inertia_weight: 0.2
