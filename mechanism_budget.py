@@ -107,13 +107,13 @@ def main():
        b=np.asarray(rows[rowmap[t.track_id]][1]);ov=float(iou_matrix([b],tg[:,2:6])[0,0])
        if ov>=.5:continue
        t.mean,t.covariance=old['pred'][0].copy(),old['pred'][1].copy();t._det=old['box'].copy();fc.meta[t.track_id]=copy.deepcopy(old['meta']);fc.snap.get(f,{}).pop(t.track_id,None);guarded.add(t);fc.count['state_writes_blocked']+=1;fc.events.append(dict(frame=f,kind='state_guard',id=t.track_id,owner=old['owner'],iou=ov))
-     if arm in ['location','location_quality','location_native','joint']:
+     if arm in ['location','location_quality','location_native','location_quality_current','location_current_native','location_quality_no_corr','joint']:
       seeds=[];mapping=[];eligible=[]
       for t,old in before.items():
        j=rowmap.get(t.track_id);m=fc.meta.get(t.track_id)
        if j is None and not(t in fc.t.lost_stracks and t.state==TrackState.Lost and m and 1<=f-t.frame_id<=5 and f-m['real']<=30):continue
-       eligible.append(t);b=np.asarray(rows[j][1] if j is not None else t.tlwh,float);pb=boxmean(old['pred'][0]);candidates=[('current',b),('prediction',pb)]
-       if t in templates:
+       eligible.append(t);b=np.asarray(rows[j][1] if j is not None else t.tlwh,float);pb=boxmean(old['pred'][0]);candidates=[('current',b)] if arm in ['location_quality_current','location_current_native'] else [('current',b),('prediction',pb)]
+       if t in templates and arm not in ['location_quality_current','location_current_native','location_quality_no_corr']:
         template=templates[t];ph,pw=template.shape;center=pb[:2]+pb[2:]/2;radius=max(16.,2*np.sqrt(max(pb[2]*pb[3],1.)));x0=max(0,int(center[0]-radius-pw/2));y0=max(0,int(center[1]-radius-ph/2));x1=min(shape[1],int(center[0]+radius+pw/2)+1);y1=min(shape[0],int(center[1]+radius+ph/2)+1);search=gray()[y0:y1,x0:x1]
         if search.shape[0]>=ph and search.shape[1]>=pw and template.std()>1e-6:
          corr=cv2.matchTemplate(search,template,cv2.TM_CCOEFF_NORMED);_,_,_,xy=cv2.minMaxLoc(corr);cb=np.array([x0+xy[0]+pw/2-pb[2]/2,y0+xy[1]+ph/2-pb[3]/2,pb[2],pb[3]]);candidates.append(('correlation',cb))
@@ -127,11 +127,11 @@ def main():
       # Candidates were generated for all eligible tracks without GT; selection below is assisted.
       for t in eligible:
        old=before[t];j=rowmap.get(t.track_id);tg=g[g[:,1]==old['owner']] if old['owner'] is not None else np.empty((0,gt.shape[1]));qs=proposals[t];fc.count['local_candidates_passed']+=len(qs)
-       if arm!='location_native':
+       if arm not in ['location_native','location_current_native']:
         if len(tg)!=1:continue
         currentiou=float(iou_matrix([rows[j][1]],tg[:,2:6])[0,0]) if j is not None else 0.
-        if arm!='location_quality' and currentiou>=.5:continue
-        qs=[x for x in qs if label(x[1],g)==old['owner'] and (arm!='location_quality' or float(iou_matrix([x[1]],tg[:,2:6])[0,0])>currentiou+1e-9)]
+        if arm not in ['location_quality','location_quality_current','location_quality_no_corr'] and currentiou>=.5:continue
+        qs=[x for x in qs if label(x[1],g)==old['owner'] and (arm not in ['location_quality','location_quality_current','location_quality_no_corr'] or float(iou_matrix([x[1]],tg[:,2:6])[0,0])>currentiou+1e-9)]
         qs.sort(key=lambda x:float(iou_matrix([x[1]],tg[:,2:6])[0,0]),reverse=True)
        else:qs.sort(key=lambda x:x[0],reverse=True)
        for p,b,origin in qs:
@@ -149,7 +149,7 @@ def main():
       m=fc.meta.get(t.track_id)
       if t.frame_id==f and m and m['real']==f:
        b=getattr(t,'_det',t.tlwh);owners[t].append((f,label(b,g)))
-       if arm in ['location','location_quality','location_native','joint']:
+       if arm in ['location','location_quality','location_native','location_quality_current','location_current_native','location_quality_no_corr','joint']:
         x,y,w,h=b;xa=max(0,int(x));ya=max(0,int(y));xb=min(shape[1],int(np.ceil(x+w)));yb=min(shape[0],int(np.ceil(y+h)))
         if xb-xa>=2 and yb-ya>=2:templates[t]=gray()[ya:yb,xa:xb].copy()
      for pid,b,score in rows:
@@ -159,7 +159,7 @@ def main():
     if arm=='A':assert out.read_bytes()==(REF/'tracks/A'/f'{n}.txt').read_bytes(),n;assert fc.count['fresh_queries']==0
     with gzip.open(AR/f'{n}.events.json.gz','wt') as h:json.dump(fc.events,h)
     dump(AR/f'{n}.images.json',imagehash);stats[n]=dict(fc.count);print(arm,n,dict(fc.count),flush=True)
-   metrics=evaluate(B/cell['dataset_root'],'test',tracks,AR/'metrics.json',names);metrics['protocol']['gt_used_only_for_evaluation']=arm in ['A','location_native'];dump(AR/'metrics.json',metrics);dump(AR/'stats.json',stats);summary[arm]={'overall':metrics['overall'],'seconds':time.time()-start,'counts':dict(sum((Counter(v) for v in stats.values()),Counter()))};dump(R/'summary.json',summary)
+   metrics=evaluate(B/cell['dataset_root'],'test',tracks,AR/'metrics.json',names);metrics['protocol']['gt_used_only_for_evaluation']=arm in ['A','location_native','location_current_native'];dump(AR/'metrics.json',metrics);dump(AR/'stats.json',stats);summary[arm]={'overall':metrics['overall'],'seconds':time.time()-start,'counts':dict(sum((Counter(v) for v in stats.values()),Counter()))};dump(R/'summary.json',summary)
   assert summary['A']['overall']['motmetrics']==json.loads((REF/'metrics/A.json').read_text())['overall']['motmetrics'] or a.smoke
  except Exception:traceback.print_exc();rc=1
  manifest.update(status='completed' if rc==0 else 'failed',finished_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),exit_code=rc);dump(R/'manifest.yaml',manifest);(R/'exit_code.txt').write_text(str(rc)+'\n');(R/'report.md').write_text('# 运行记录\n\n'+('完成，待收益判读。' if rc==0 else '失败保留。')+'\n');(R/'payload_checksums.sha256').write_text(''.join(sha(p)+'  '+str(p.relative_to(R))+'\n' for p in sorted(R.rglob('*')) if p.is_file() and p.name not in ['payload_checksums.sha256','manifest.yaml','report.md']));sys.exit(rc)
