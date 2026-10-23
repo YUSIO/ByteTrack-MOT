@@ -268,6 +268,8 @@ class BYTETracker(object):
         if homa is None and not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        if getattr(self, 'association_audit', None) is not None:
+            self.association_audit('high', strack_pool, detections, dists, matches)
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -293,6 +295,8 @@ class BYTETracker(object):
                              or (k > 0 and strack_pool[i].state == TrackState.Lost and self.frame_id - strack_pool[i].end_frame <= k)]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
+        if getattr(self, 'association_audit', None) is not None:
+            self.association_audit('low', r_tracked_stracks, detections_second, dists, matches)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
@@ -315,6 +319,8 @@ class BYTETracker(object):
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
+        if getattr(self, 'association_audit', None) is not None:
+            self.association_audit('unconfirmed', unconfirmed, detections, dists, matches)
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
             activated_starcks.append(unconfirmed[itracked])
