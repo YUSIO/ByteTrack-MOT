@@ -20,7 +20,7 @@ import torch
 from .data import read_image, sequence_info, read_train_sequences
 from .weak import (WeakDetector, WeakOnline, CausalState, DetectionTracker,
                    heat_from_record, postprocess_rows, render, select_rows)
-from .weak_history import sha256, train_batch
+from .weak_history import sha256, train_batch, make_optimizer
 
 REFERENCE = '46820526c6477c3498ae596711df7fc9fb7633f6'
 
@@ -260,7 +260,7 @@ def preflight(root,protocol,output,manifest):
         target=torch.zeros(2,max(1,max(len(t) for t in target_list)),5)
         for i,t in enumerate(target_list):target[i,:len(t)]=t
         batches.append((torch.cat([x[2] for x in part]),torch.cat([x[3] for x in part]),target))
-    optimizer=torch.optim.SGD(model.parameters(),lr=1e-4,momentum=.9,weight_decay=1e-4)
+    optimizer=make_optimizer(model)
     before=[p.detach().clone() for p in model.adapter.parameters()]
     losses=[];gradients=[]
     # Four updates suffice to exercise the zero-initialized output path; cap remains 20.

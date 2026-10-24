@@ -22,6 +22,13 @@ def sha256(path):
 
 def load_snapshot(path):
     state = torch.load(path, map_location='cpu', weights_only=True)
+    if state.get('weak_config') == 'exp162_frozen_v3':
+        base = Path(state['base_checkpoint'])
+        if sha256(base) != state['base_checkpoint_sha256']:
+            raise ValueError('Frozen base checkpoint changed')
+        model = WeakDetector(base)
+        model.adapter.load_state_dict(state['adapter'], strict=True)
+        return model
     if state.get('weak_config') == 'exp162_v1':
         model = WeakDetector()
         model.load_state_dict(state['model'], strict=True)
@@ -117,17 +124,33 @@ def collate(batch):
 def train_batch(model, optimizer, images, heat, targets):
     """One bounded optimizer step; caller owns budget and immutable run record."""
     model.train()
-    for layer in model.modules():
-        if isinstance(layer, torch.nn.BatchNorm2d):
-            layer.eval()
+    assert_frozen_detector(model)
+    expected = {id(p) for p in model.adapter.parameters()}
+    actual = [id(p) for group in optimizer.param_groups for p in group['params']]
+    if set(actual) != expected or len(actual) != len(expected):
+        raise ValueError('Optimizer must contain exactly the adapter parameters')
     optimizer.zero_grad(set_to_none=True)
     losses = model(images, heat.detach(), targets=targets)
     loss = losses['total_loss']
     if not torch.isfinite(loss):
         raise FloatingPointError('Nonfinite loss')
     loss.backward()
+    assert_frozen_detector(model)
     if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
         raise FloatingPointError('Nonfinite gradients')
     optimizer.step()
     return {key: float(value.detach()) if torch.is_tensor(value) else float(value)
             for key,value in losses.items()}
+
+
+def assert_frozen_detector(model):
+    if any(p.requires_grad or p.grad is not None for p in model.detector.parameters()):
+        raise ValueError('Detector parameters must be frozen with no gradients')
+    if any(layer.training for layer in model.detector.modules()):
+        raise ValueError('Detector and BatchNorm must stay in eval mode')
+
+
+def make_optimizer(model, lr=1e-4, momentum=.9, weight_decay=1e-4):
+    assert_frozen_detector(model)
+    return torch.optim.SGD(model.adapter.parameters(), lr=lr,
+                           momentum=momentum, weight_decay=weight_decay)

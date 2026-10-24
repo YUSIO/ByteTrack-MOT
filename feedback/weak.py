@@ -76,9 +76,18 @@ class WeakDetector(nn.Module):
         cfg = {'mode': 'none', 'architecture': architecture or {'depth': 1.33, 'width': 1.25}}
         self.detector = build(cfg, checkpoint).detector
         self.adapter = WeakAdapter(int(256 * cfg['architecture']['width']))
+        self.detector.requires_grad_(False)
+        self.train(self.training)
+
+    def train(self, mode=True):
+        super().train(mode)
+        # Freeze parameters AND all running statistics, including head BatchNorm.
+        self.detector.eval()
+        return self
 
     def forward(self, images, heat=None, targets=None, enabled=True, return_residual=False):
-        features = self.detector.backbone(images)
+        with torch.no_grad():
+            features = self.detector.backbone(images)
         if heat is None:
             heat = images.new_zeros((len(images), 1, *features[0].shape[-2:]))
         if heat.shape != (len(images), 1, *features[0].shape[-2:]):
@@ -88,7 +97,16 @@ class WeakDetector(nn.Module):
         if self.training:
             if targets is None:
                 raise ValueError('Current-frame detection targets required in train mode')
-            values = self.detector.head(features, targets, images)
+            # YOLOXHead uses its own flag to dispatch loss vs decoded prediction.
+            # Change only that flag; its children (especially BN) remain in eval.
+            # Do NOT disable autograd here: loss gradients must reach the adapter.
+            head = self.detector.head
+            previous = head.training
+            try:
+                head.training = True
+                values = head(features, targets, images)
+            finally:
+                head.training = previous
             result = dict(zip(('total_loss', 'iou_loss', 'conf_loss', 'cls_loss',
                                'l1_loss', 'num_fg'), values))
         else:
@@ -98,7 +116,7 @@ class WeakDetector(nn.Module):
 
 class CausalState:
     def __init__(self, arm):
-        if arm not in ('B0', 'B1', 'T', 'TU', 'TU_Uoff', 'TU_Ushift'):
+        if arm not in ('B0', 'T', 'TU', 'TU_Uoff', 'TU_Ushift'):
             raise ValueError(arm)
         self.arm = arm
         self.reset('unset')
@@ -137,7 +155,7 @@ def heat_from_record(record, ratio, hw, expected_sequence=None, expected_frame=N
     rows = np.asarray(record['rows'], np.float64).reshape(-1, 5)
     if record['source_frame'] == 0 and (len(rows) or record['t'] or record['u']):
         raise ValueError('First frame cannot have history')
-    if record['arm'] in ('B0', 'B1'):
+    if record['arm'] == 'B0':
         return torch.zeros((1, *hw))
     t = render(rows[record['t']], ratio, hw)
     if record['arm'] in ('T', 'TU_Uoff'):
