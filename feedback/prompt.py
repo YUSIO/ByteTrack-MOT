@@ -11,10 +11,16 @@ from torch.nn import functional as F
 
 
 class PriorPrompt(nn.Module):
-    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False, content_score="scaled_dot"):
+    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False, content_score="scaled_dot",
+                 backprojection="mean", projection_init_gain=0.):
         super().__init__()
         if content_score not in ("scaled_dot", "cosine"):
             raise ValueError("Unknown content score")
+        if backprojection not in ("mean", "patch_mean_compensated"):
+            raise ValueError("Unknown backprojection")
+        if projection_init_gain < 0 or not math.isfinite(projection_init_gain):
+            raise ValueError("Invalid projection initialization gain")
+        self.backprojection = backprojection
         self.content_score = content_score
         self.position_encoding = position_encoding
         if position_encoding and dim % 4:
@@ -26,7 +32,11 @@ class PriorPrompt(nn.Module):
         self.key, self.value = nn.Linear(dim, dim), nn.Linear(dim, dim)
         self.to_patch = nn.Linear(dim, 3 * patch * patch, bias=False)
         # Exact baseline at initialization; not specified by the paper.
-        nn.init.zeros_(self.to_patch.weight)
+        if projection_init_gain == 0:
+            nn.init.zeros_(self.to_patch.weight)
+        else:
+            # Small nonzero fan-in initialization lets detection loss reach Q/K/V.
+            nn.init.normal_(self.to_patch.weight, std=projection_init_gain / math.sqrt(dim))
 
     def forward(self, image, boxes, ids):
         """One frame; boxes are xywh in detector-input pixels, IDs are persistent.
@@ -51,10 +61,22 @@ class PriorPrompt(nn.Module):
         q = self.encode_query(boxes, ids, h, w)
         attention = self.attention(q, patches, h, w)
         prompt = attention @ self.value(patches)  # PPTracker Eq. (1), N x D
-        grid = attention.T @ prompt / len(boxes)  # declared shape-completion choice
+        grid = self.backproject(attention, prompt)
         delta = F.fold(self.to_patch(grid).T.unsqueeze(0), padded.shape[-2:],
                        kernel_size=self.patch, stride=self.patch)
         return image + delta[:, :, :h, :w]  # Eq. (2), before backbone
+
+    def backproject(self, attention, prompt):
+        """Declared migration bridge; compensate uniform 1/M spatial dilution.
+
+        Keep spatial weights, including the one-object case. Dividing each patch
+        by its attention mass would cancel all spatial dependence when N=1.
+        Sharp attention can still amplify local values; real-loss gates audit it.
+        """
+        grid = attention.T @ prompt / len(prompt)
+        if self.backprojection == "patch_mean_compensated":
+            grid = grid * attention.shape[1]
+        return grid
 
     def encode_query(self, boxes, ids, h, w):
         norm = boxes / boxes.new_tensor([w, h, w, h])
