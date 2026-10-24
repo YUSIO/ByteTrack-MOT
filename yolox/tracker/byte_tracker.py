@@ -149,6 +149,7 @@ class BYTETracker(object):
         self.removed_stracks = []  # type: list[STrack]
 
         self.frame_id = 0
+        self.audit_detections = getattr(args, "audit_detections", False)
         self.args = args
         #self.det_thresh = args.track_thresh
         self.det_thresh = args.track_thresh + 0.1
@@ -156,8 +157,22 @@ class BYTETracker(object):
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
 
+    def _observe_consumption(self, track, detection, stage):
+        # Bookkeeping only. Never changes scores, geometry, costs or lifecycle.
+        if self.audit_detections:
+            row = detection.det_row_id
+            if self.last_detection_audit[row]["consumed_by"] is not None:
+                raise RuntimeError("Detection consumed twice")
+            self.last_detection_audit[row].update(
+                consumed_by=int(track.track_id), match_stage=stage)
+
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
+        if self.audit_detections:
+            self.last_detection_audit = [
+                {"det_row_id": i, "consumed_by": None,
+                 "match_stage": None, "output_confirmed": False}
+                for i in range(len(output_results))]
         activated_starcks = []
         refind_stracks = []
         lost_stracks = []
@@ -191,6 +206,10 @@ class BYTETracker(object):
         else:
             detections = []
 
+        if self.audit_detections:
+            for detection, row in zip(detections, np.flatnonzero(remain_inds)):
+                detection.det_row_id = int(row)
+
         ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
@@ -219,6 +238,8 @@ class BYTETracker(object):
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
 
+            self._observe_consumption(track, det, "high")
+
         ''' Step 3: Second association, with low score detection boxes'''
         # association the untrack to the low score detections
         if len(dets_second) > 0:
@@ -227,6 +248,9 @@ class BYTETracker(object):
                           (tlbr, s) in zip(dets_second, scores_second)]
         else:
             detections_second = []
+        if self.audit_detections:
+            for detection, row in zip(detections_second, np.flatnonzero(inds_second)):
+                detection.det_row_id = int(row)
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
@@ -239,6 +263,8 @@ class BYTETracker(object):
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
+
+            self._observe_consumption(track, det, "low")
 
         for it in u_track:
             track = r_tracked_stracks[it]
@@ -255,6 +281,7 @@ class BYTETracker(object):
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
             activated_starcks.append(unconfirmed[itracked])
+            self._observe_consumption(unconfirmed[itracked], detections[idet], "unconfirmed")
         for it in u_unconfirmed:
             track = unconfirmed[it]
             track.mark_removed()
@@ -266,6 +293,7 @@ class BYTETracker(object):
             if track.score < self.det_thresh:
                 continue
             track.activate(self.kalman_filter, self.frame_id)
+            self._observe_consumption(track, track, "birth")
             activated_starcks.append(track)
         """ Step 5: Update state"""
         for track in self.lost_stracks:
@@ -286,6 +314,10 @@ class BYTETracker(object):
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
+        if self.audit_detections:
+            confirmed = {int(t.track_id) for t in output_stracks}
+            for row in self.last_detection_audit:
+                row["output_confirmed"] = row["consumed_by"] in confirmed
         return output_stracks
 
 
