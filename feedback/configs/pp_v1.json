@@ -1,0 +1,26 @@
+{
+  "mode": "pp",
+  "architecture": {
+    "depth": 1.33,
+    "width": 1.25
+  },
+  "input_size": [
+    800,
+    1440
+  ],
+  "conf": 0.001,
+  "nms": 0.7,
+  "window": 8,
+  "tracker": {
+    "track_thresh": 0.6,
+    "track_buffer": 30,
+    "match_thresh": 0.9,
+    "mot20": false
+  },
+  "prompt": {
+    "dim": 64,
+    "patch": 16,
+    "bins": 1024,
+    "max_ids": 4096
+  }
+}
