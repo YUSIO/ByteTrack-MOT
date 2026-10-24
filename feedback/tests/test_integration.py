@@ -10,6 +10,23 @@ TRACKER={'track_thresh':.6,'track_buffer':30,'match_thresh':.9,'mot20':False}
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_frozen_detector_preserves_input_gradient_and_weights(self):
+        from feedback.train import configure_detector_training
+        from feedback.learning_gate import state_hash
+        m=build({'mode':'pp','architecture':{'depth':.33,'width':.25},
+                 'prompt':{'dim':8,'patch':4,'bins':16,'max_ids':16,'projection_init_gain':.01}})
+        configure_detector_training(m,True)
+        before=state_hash(m.detector)
+        opt=torch.optim.SGD([p for p in m.parameters() if p.requires_grad],lr=.001)
+        x=torch.randn(2,3,64,96)
+        labels=torch.tensor([[[0.,30.,25.,8.,6.]],[[0.,35.,25.,8.,6.]]])
+        contexts=[{'boxes':torch.tensor([[25.,20.,8.,6.]]),'ids':torch.tensor([1])}]*2
+        m(x,labels,contexts)['total_loss'].backward()
+        self.assertGreater(m.feedback.key.weight.grad.abs().sum().item(),0)
+        self.assertGreater(m.feedback.to_patch.weight.grad.abs().sum().item(),0)
+        self.assertTrue(all(p.grad is None for p in m.detector.parameters()))
+        opt.step();self.assertEqual(before,state_hash(m.detector))
+
     def test_feedback_off_equals_original_yolox(self):
         torch.manual_seed(1);torch.set_num_threads(2)
         m=build({'mode':'none','architecture':{'depth':.33,'width':.25}}).eval()
