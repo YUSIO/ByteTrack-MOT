@@ -11,8 +11,11 @@ from torch.nn import functional as F
 
 
 class PriorPrompt(nn.Module):
-    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False):
+    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False, content_score="scaled_dot"):
         super().__init__()
+        if content_score not in ("scaled_dot", "cosine"):
+            raise ValueError("Unknown content score")
+        self.content_score = content_score
         self.position_encoding = position_encoding
         if position_encoding and dim % 4:
             raise ValueError("2D Fourier position encoding requires dim divisible by 4")
@@ -72,8 +75,23 @@ class PriorPrompt(nn.Module):
         phase = 2 * math.pi * xy[..., None] * frequency
         return torch.cat((phase.sin(), phase.cos()), dim=-1).flatten(1)
 
-    def attention(self, q, patches, h, w):
+    def content_logits(self, q, keys):
+        if self.content_score == "cosine":
+            # Fixed unit-temperature cosine: bounded [-1, 1], no tuned gain.
+            return F.normalize(q, dim=-1, eps=1e-6) @ F.normalize(keys, dim=-1, eps=1e-6).T
+        return q @ keys.T / math.sqrt(self.dim)
+
+    def attention_logits(self, q, patches, h, w):
         keys = self.key(patches)
+        if self.content_score == "scaled_dot":
+            # Preserve the exact previous implementation for old configs.
+            if self.position_encoding:
+                keys = keys + self.patch_positions(h, w, keys)
+            return q @ keys.T / math.sqrt(self.dim)
+        logits = self.content_logits(q, keys)
         if self.position_encoding:
-            keys = keys + self.patch_positions(h, w, keys)
-        return (q @ keys.T / math.sqrt(self.dim)).softmax(-1)
+            logits = logits + q @ self.patch_positions(h, w, keys).T / math.sqrt(self.dim)
+        return logits
+
+    def attention(self, q, patches, h, w):
+        return self.attention_logits(q, patches, h, w).softmax(-1)
