@@ -42,12 +42,19 @@ def main():
     config = json.loads(a.config.read_text())
     device = torch.device(a.device)
     predictor = None
+    for initialization in [a.checkpoint, a.psmp_checkpoint]:
+        if initialization is not None:
+            state = torch.load(initialization, map_location='cpu', weights_only=True)
+            if state.get('metadata', {}).get('preflight') and not a.max_steps:
+                p.error('Preflight weights may only initialize another explicit --max-steps preflight')
+            del state
     if a.phase == 'psmp':
         from .psmp import PSMP, psmp_loss
         if a.checkpoint:
             p.error('PSMP resume is not implemented; create a new explicit training attempt')
         model = PSMP(**config['psmp']).to(device)
-        data = TrajectoryWindows(a.data_root, a.sequences, config['input_size'])
+        data = TrajectoryWindows(a.data_root, a.sequences, config['input_size'],
+                                 config['psmp']['observed'], config['psmp']['predicted'])
     else:
         if a.checkpoint is None:
             p.error('Detector fine-tuning requires an explicit shared initialization')
