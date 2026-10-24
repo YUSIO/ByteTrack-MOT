@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/MediaBrain-SJTU/EqMotion",
+  "commit": "5aec2e0b61c511fa93a24138dd90da59a089084b",
+  "retrieved": "2026-10-24",
+  "source_directory": "n_body_system",
+  "modifications": [
+    "model_t.py import changed to relative .gcl_t; no algorithm edits"
+  ],
+  "files": [
+    {
+      "path": "model_t.py",
+      "upstream_sha256": "6cb692651671e55b22a85924a969bdb55c3f16d0c8197098cbff84cf08becf4f",
+      "vendored_sha256": "90cf7941673a192215fdf8dd9374293a45d4b98f0ed035c73a4a15be9a0aff6c"
+    },
+    {
+      "path": "gcl_t.py",
+      "upstream_sha256": "f02c32c2a96061d5b5da2e0f94df237bf7e1690602626c273cc0000ebc307ad3",
+      "vendored_sha256": "f02c32c2a96061d5b5da2e0f94df237bf7e1690602626c273cc0000ebc307ad3"
+    },
+    {
+      "path": "LICENSE",
+      "upstream_sha256": "f1d3136868b8e8bd929d21257c3b9c6970e398a052d6a7b5ed02cfc72c49caf1",
+      "vendored_sha256": "f1d3136868b8e8bd929d21257c3b9c6970e398a052d6a7b5ed02cfc72c49caf1"
+    }
+  ]
+}
