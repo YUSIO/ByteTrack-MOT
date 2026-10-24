@@ -1,10 +1,14 @@
 import copy
+import json
+from pathlib import Path
+import tempfile
 import unittest
+import cv2
 import numpy as np
 import torch
 from feedback.weak import (CausalState, DetectionTracker, WeakAdapter, WeakDetector,
                            heat_from_record, render, select_rows)
-from feedback.weak_history import train_batch
+from feedback.weak_history import train_batch, SnapshotPairs, sha256
 
 
 def det(x, s, y=0.):
@@ -147,6 +151,44 @@ class Rendering(unittest.TestCase):
         h=s.snapshot('a',2,'x');tu=heat_from_record(h,1.,(100,180));h['arm']='T'
         t=heat_from_record(h,1.,(100,180))
         self.assertTrue(torch.all(tu>=t));self.assertGreater((tu-t).sum(),0)
+
+
+class TrainingHistory(unittest.TestCase):
+    def fixture(self, root):
+        path=root/'train/UAVSwarm-03';(path/'img1').mkdir(parents=True);(path/'gt').mkdir()
+        (path/'seqinfo.ini').write_text('[Sequence]\nname=UAVSwarm-03\nimDir=img1\nframeRate=30\nseqLength=2\nimWidth=32\nimHeight=32\nimExt=.jpg\n')
+        (path/'gt/gt.txt').write_text('1,1,1,1,5,5,1,1,1\n2,1,2,2,5,5,1,1,1\n')
+        for frame in (1,2):cv2.imwrite(str(path/'img1'/f'{frame:06d}.jpg'),np.zeros((32,32,3),np.uint8))
+        cache=root/'cache';cache.mkdir();state=CausalState('TU');state.reset('UAVSwarm-03')
+        first=state.snapshot('UAVSwarm-03',1,'snapshot')
+        d=rows([det(10,.3)]);_,audit=DetectionTracker().update(d,(32,32))
+        state.advance('UAVSwarm-03',1,d,audit);second=state.snapshot('UAVSwarm-03',2,'snapshot')
+        file=cache/'UAVSwarm-03.jsonl';file.write_text(json.dumps(first)+'\n'+json.dumps(second)+'\n')
+        manifest={'snapshot_sha256':'snapshot','arm':'TU','sequences':['UAVSwarm-03'],
+                  'gt_access':False,'files':{'UAVSwarm-03':sha256(file)}}
+        (cache/'manifest.json').write_text(json.dumps(manifest))
+        return path,cache
+
+    def test_GT_changes_targets_not_feedback_and_shuffle_keeps_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path,cache=self.fixture(root)
+            pairs=SnapshotPairs(root,['UAVSwarm-03'],cache,'snapshot','TU')
+            second=pairs[1];first=pairs[0]
+            self.assertEqual(first[1].sum(),0);self.assertGreater(second[1].sum(),0)
+            self.assertFalse(second[1].requires_grad)
+            (path/'gt/gt.txt').write_text('1,1,20,20,5,5,1,1,1\n2,1,22,22,5,5,1,1,1\n')
+            changed=SnapshotPairs(root,['UAVSwarm-03'],cache,'snapshot','TU')[1]
+            self.assertTrue(torch.equal(second[1],changed[1]))
+            self.assertFalse(torch.equal(second[2],changed[2]))
+            self.assertTrue(torch.equal(pairs[1][1],second[1]))
+
+    def test_wrong_epoch_arm_and_tampered_cache_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);_,cache=self.fixture(root)
+            for snapshot,arm in [('stale','TU'),('snapshot','T')]:
+                with self.assertRaises(ValueError):SnapshotPairs(root,['UAVSwarm-03'],cache,snapshot,arm)
+            with (cache/'UAVSwarm-03.jsonl').open('a') as f:f.write('\n')
+            with self.assertRaises(ValueError):SnapshotPairs(root,['UAVSwarm-03'],cache,'snapshot','TU')
 
 
 if __name__=='__main__':unittest.main()
