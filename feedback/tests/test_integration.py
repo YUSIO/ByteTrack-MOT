@@ -11,7 +11,7 @@ TRACKER={'track_thresh':.6,'track_buffer':30,'match_thresh':.9,'mot20':False}
 
 class IntegrationTests(unittest.TestCase):
     def test_frozen_detector_preserves_input_gradient_and_weights(self):
-        from feedback.train import configure_detector_training
+        from feedback.train import configure_detector_training, backward_loss
         from feedback.learning_gate import state_hash
         m=build({'mode':'pp','architecture':{'depth':.33,'width':.25},
                  'prompt':{'dim':8,'patch':4,'bins':16,'max_ids':16,'projection_init_gain':.01}})
@@ -26,6 +26,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertGreater(m.feedback.to_patch.weight.grad.abs().sum().item(),0)
         self.assertTrue(all(p.grad is None for p in m.detector.parameters()))
         opt.step();self.assertEqual(before,state_hash(m.detector))
+        opt.zero_grad(set_to_none=True)
+        feedback_before=state_hash(m.feedback)
+        loss=m(x,labels,[None,None])['total_loss']
+        self.assertFalse(backward_loss(loss,True))
+        opt.step()
+        self.assertEqual(feedback_before,state_hash(m.feedback))
+        self.assertEqual(before,state_hash(m.detector))
 
     def test_feedback_off_equals_original_yolox(self):
         torch.manual_seed(1);torch.set_num_threads(2)

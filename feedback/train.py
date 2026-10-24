@@ -30,6 +30,17 @@ def configure_detector_training(model, freeze_detector=False):
             layer.eval()
 
 
+def backward_loss(loss, frozen_detector=False):
+    # A frozen detector plus an entirely empty-prior batch has no trainable path.
+    # Preserve exact identity and skip updates rather than invent a prompt/gradient.
+    if not loss.requires_grad:
+        if not frozen_detector:
+            raise RuntimeError('Loss has no trainable path')
+        return False
+    loss.backward()
+    return True
+
+
 def collate(samples):
     return samples
 
@@ -125,6 +136,7 @@ def main():
     validation_rows = []
     started = time.monotonic()
     step = 0
+    first_feedback_gradients_recorded = False
     if a.validate_initial:
         from .validate import validate
         initial = {}
@@ -173,7 +185,7 @@ def main():
                     loss = result['total_loss']
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite loss')
-                loss.backward()
+                backward_performed = backward_loss(loss,a.freeze_detector)
                 if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
                     raise FloatingPointError('Nonfinite gradient')
                 if shadow is not None:
@@ -183,9 +195,10 @@ def main():
                             indices=(c['boxes']/c['boxes'].new_tensor([w,h,w,h])).clamp(0,1)
                             indices=(indices*(model.feedback.bins-1)).round().long().cpu()
                             for d in range(4):touched[d].update(indices[:,d].tolist())
-                    if step==0:
+                    if backward_performed and not first_feedback_gradients_recorded:
                         gradients={n:None if p.grad is None else float(p.grad.square().mean().sqrt()) for n,p in model.feedback.named_parameters()}
                         (a.output/'initial_feedback_gradients.json').write_text(json.dumps(gradients,indent=2)+'\n')
+                        first_feedback_gradients_recorded = True
                 optimizer.step()
                 if shadow is not None:
                     for param,reference in zip(model.feedback.parameters(),shadow.parameters()):
@@ -196,7 +209,7 @@ def main():
                 if a.phase == 'detector' and config['mode'] == 'eec':
                     model.feedback.clamp_parameters()
                 step += 1
-                entry={'epoch':epoch+1,'step':step,'loss':float(loss.detach())}
+                entry={'epoch':epoch+1,'step':step,'loss':float(loss.detach()),'backward_performed':backward_performed}
                 if a.phase=='detector':
                     entry['loss_components']={k:float(v.detach()) if torch.is_tensor(v) else float(v) for k,v in result.items()}
                 if residual_samples:
