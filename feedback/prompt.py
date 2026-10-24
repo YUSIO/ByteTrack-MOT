@@ -12,14 +12,19 @@ from torch.nn import functional as F
 
 class PriorPrompt(nn.Module):
     def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False, content_score="scaled_dot",
-                 backprojection="mean", projection_init_gain=0.):
+                 backprojection="mean", projection_init_gain=0., spatial_score="learned_fourier"):
         super().__init__()
         if content_score not in ("scaled_dot", "cosine"):
             raise ValueError("Unknown content score")
-        if backprojection not in ("mean", "patch_mean_compensated"):
+        if backprojection not in ("mean", "patch_mean_compensated", "peak_coverage"):
             raise ValueError("Unknown backprojection")
         if projection_init_gain < 0 or not math.isfinite(projection_init_gain):
             raise ValueError("Invalid projection initialization gain")
+        if spatial_score not in ("learned_fourier", "box_gaussian"):
+            raise ValueError("Unknown spatial score")
+        if spatial_score == "box_gaussian" and content_score != "cosine":
+            raise ValueError("Box geometry requires bounded cosine content")
+        self.spatial_score = spatial_score
         self.backprojection = backprojection
         self.content_score = content_score
         self.position_encoding = position_encoding
@@ -59,7 +64,7 @@ class PriorPrompt(nn.Module):
         padded = F.pad(image, (0, (-w) % self.patch, 0, (-h) % self.patch))
         patches = self.patch_embed(padded).flatten(2).transpose(1, 2)[0]
         q = self.encode_query(boxes, ids, h, w)
-        attention = self.attention(q, patches, h, w)
+        attention = self.attention(q, patches, h, w, boxes)
         prompt = attention @ self.value(patches)  # PPTracker Eq. (1), N x D
         grid = self.backproject(attention, prompt)
         delta = F.fold(self.to_patch(grid).T.unsqueeze(0), padded.shape[-2:],
@@ -73,6 +78,11 @@ class PriorPrompt(nn.Module):
         by its attention mass would cancel all spatial dependence when N=1.
         Sharp attention can still amplify local values; real-loss gates audit it.
         """
+        if self.backprojection == "peak_coverage":
+            # Each object writes at most unit weight. Blend overlapping writes;
+            # preserve sub-unit support when N=1 instead of cancelling it.
+            support = attention / attention.amax(-1, keepdim=True)
+            return (support.T @ prompt) / support.sum(0)[:, None].clamp_min(1.)
         grid = attention.T @ prompt / len(prompt)
         if self.backprojection == "patch_mean_compensated":
             grid = grid * attention.shape[1]
@@ -103,8 +113,29 @@ class PriorPrompt(nn.Module):
             return F.normalize(q, dim=-1, eps=1e-6) @ F.normalize(keys, dim=-1, eps=1e-6).T
         return q @ keys.T / math.sqrt(self.dim)
 
-    def attention_logits(self, q, patches, h, w):
+    def geometry_logits(self, boxes, h, w, reference):
+        """Continuous prior geometry; no current GT or learned bin-to-pixel map.
+
+        One patch is the minimum sigma; larger boxes use half their width/height.
+        No wraparound in the image plane. Previous-box error remains a limitation.
+        """
+        rows, cols = math.ceil(h / self.patch), math.ceil(w / self.patch)
+        y, x = torch.meshgrid(torch.arange(rows, device=reference.device),
+                              torch.arange(cols, device=reference.device), indexing="ij")
+        centers = torch.stack((x + .5, y + .5), -1).reshape(-1, 2).to(reference) * self.patch
+        center = boxes[:, :2] + boxes[:, 2:] / 2
+        sigma = (boxes[:, 2:] / 2).clamp_min(self.patch)
+        return -.5 * (((centers[None] - center[:, None]) / sigma[:, None]) ** 2).sum(-1)
+
+    def attention_logits(self, q, patches, h, w, boxes=None):
         keys = self.key(patches)
+        if self.spatial_score == "box_gaussian":
+            logits = self.content_logits(q, keys)
+            if self.position_encoding:
+                if boxes is None or len(boxes) != len(q):
+                    raise ValueError("One historical box per query required")
+                logits = logits + self.geometry_logits(boxes, h, w, keys)
+            return logits
         if self.content_score == "scaled_dot":
             # Preserve the exact previous implementation for old configs.
             if self.position_encoding:
@@ -115,5 +146,5 @@ class PriorPrompt(nn.Module):
             logits = logits + q @ self.patch_positions(h, w, keys).T / math.sqrt(self.dim)
         return logits
 
-    def attention(self, q, patches, h, w):
-        return self.attention_logits(q, patches, h, w).softmax(-1)
+    def attention(self, q, patches, h, w, boxes=None):
+        return self.attention_logits(q, patches, h, w, boxes).softmax(-1)

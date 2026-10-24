@@ -6,6 +6,8 @@ import json
 import subprocess
 import sys
 import time
+import traceback
+import gc
 from pathlib import Path
 import torch
 from .model import build
@@ -99,79 +101,91 @@ def main():
     with (a.output / 'steps.jsonl').open('w') as log:
         for seed in p['seeds']:
             for arm, settings in p['arms'].items():
-                torch.manual_seed(seed)
-                cfg = copy.deepcopy(config); cfg['prompt'].update(settings)
-                model = build(cfg, a.checkpoint).to(a.device).train()
-                model.detector.requires_grad_(False)
-                for layer in model.modules():
-                    if isinstance(layer, torch.nn.BatchNorm2d): layer.eval()
-                detector_hash = state_hash(model.detector)
-                active = [set() for _ in range(4)]
-                for s in fit:
-                    h, w = cfg['input_size']
-                    indices = ((s['boxes'] / torch.tensor([w, h, w, h])).clamp(0, 1) * (model.feedback.bins - 1)).round().long()
-                    for d in range(4): active[d].update(indices[:, d].tolist())
-                active = [sorted(x) for x in active]
-                init = {n: v.detach().clone() for n, v in measured_parameters(model.feedback, active)}
-                shadow = copy.deepcopy(model.feedback)
-                optimizer = torch.optim.SGD(model.feedback.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
-                decay = torch.optim.SGD(shadow.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
-                before = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
-                generator = torch.Generator().manual_seed(seed + 1000)
-                row = {'seed': seed, 'arm': arm, 'before': before, 'initial_gradients': {}, 'finite': True}
-                for step in range(p['steps']):
-                    if step % (len(fit) // p['batch_size']) == 0:
-                        order = torch.randperm(len(fit), generator=generator).tolist()
-                    pos = (step * p['batch_size']) % len(fit)
-                    x, y, c = batch([fit[i] for i in order[pos:pos + p['batch_size']]], a.device)
-                    optimizer.zero_grad(set_to_none=True)
-                    loss = model(x, y, c)['total_loss']; loss.backward()
-                    finite = bool(torch.isfinite(loss)) and all(v.grad is not None and bool(torch.isfinite(v.grad).all()) for v in model.feedback.parameters())
-                    if not finite:
-                        row['finite'] = False; break
-                    if step == 0:
-                        for name, param in model.feedback.named_parameters():
-                            if name in init:
-                                grad = param.grad[active[int(name.split('.')[1])]] if name.startswith('coordinate.') else param.grad
-                                row['initial_gradients'][name] = float(grad.square().mean().sqrt())
-                    optimizer.step()
-                    for value in shadow.parameters(): value.grad = torch.zeros_like(value)
-                    decay.step()
-                    entry = {'seed': seed, 'arm': arm, 'step': step + 1, 'loss': float(loss.detach())}
-                    log.write(json.dumps(entry) + '\n'); log.flush()
-                    if step == 0 or (step + 1) % 20 == 0:
-                        print(json.dumps(entry), flush=True)
-                after = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
-                decay_values = dict(measured_parameters(shadow, active))
-                updates = {}
-                for name, param in measured_parameters(model.feedback, active):
-                    scale = init[name].square().mean().sqrt().clamp_min(1e-6)
-                    updates[name] = float((param.detach() - decay_values[name].detach()).square().mean().sqrt() / scale)
-                f, c = after['fit'], after['check']; gates = p['gates_every_seed_both']
-                diagnostics = {
-                    'finite': row['finite'], 'detector_bitwise_unchanged': detector_hash == state_hash(model.detector),
-                    'fit_relative_loss_reduction': 1 - f['correct']['mean_loss'] / before['fit']['correct']['mean_loss'],
-                    'fit_final_improvement_over_off': 1 - f['correct']['mean_loss'] / f['off']['mean_loss'],
-                    'check_final_loss_over_off': c['correct']['mean_loss'] / c['off']['mean_loss'],
-                    'fit_shifted_loss_margin_relative': (f['shifted']['mean_loss'] - f['correct']['mean_loss']) / f['correct']['mean_loss'],
-                    'check_shifted_loss_margin_relative': (c['shifted']['mean_loss'] - c['correct']['mean_loss']) / c['correct']['mean_loss'],
-                    'task_update_relative_rms': updates}
-                delta_list = before['fit']['correct']['deltas'] + before['check']['correct']['deltas'] + f['correct']['deltas'] + c['correct']['deltas']
-                checks = {'finite': diagnostics['finite'], 'detector_unchanged': diagnostics['detector_bitwise_unchanged'],
-                          'fit_learning': diagnostics['fit_relative_loss_reduction'] >= gates['fit_relative_loss_reduction_min'],
-                          'fit_beats_off': diagnostics['fit_final_improvement_over_off'] >= gates['fit_final_improvement_over_off_min'],
-                          'check_no_harm': diagnostics['check_final_loss_over_off'] <= gates['check_final_loss_over_off_max'],
-                          'fit_correct_history': diagnostics['fit_shifted_loss_margin_relative'] >= gates['fit_shifted_loss_margin_relative_min'],
-                          'check_correct_history': diagnostics['check_shifted_loss_margin_relative'] >= gates['check_shifted_loss_margin_relative_min'],
-                          'effective_updates': all(v >= gates['task_update_relative_rms_min'] for v in updates.values()),
-                          'initial_upstream_gradients': all(v > 0 for v in row['initial_gradients'].values()),
-                          'bounded_nontrivial_residual': all(gates['delta_normalized_rms_min'] <= d['rms'] <= gates['delta_normalized_rms_max'] and d['max_abs'] <= gates['delta_normalized_maxabs_max'] for d in delta_list)}
-                row.update(after=after, diagnostics=diagnostics, gates=checks, passed=all(checks.values()), completed_steps=step + 1)
-                result['runs'].append(row)
-                (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-                print(json.dumps({'seed': seed, 'arm': arm, 'gates': checks, 'diagnostics': diagnostics}), flush=True)
-                del model, shadow, optimizer, decay, init, x, y, loss
-                if str(a.device).startswith('cuda'): torch.cuda.empty_cache()
+                try:
+                    torch.manual_seed(seed)
+                    cfg = copy.deepcopy(config); cfg['prompt'].update(settings)
+                    model = build(cfg, a.checkpoint).to(a.device).train()
+                    model.detector.requires_grad_(False)
+                    for layer in model.modules():
+                        if isinstance(layer, torch.nn.BatchNorm2d): layer.eval()
+                    detector_hash = state_hash(model.detector)
+                    active = [set() for _ in range(4)]
+                    for s in fit:
+                        h, w = cfg['input_size']
+                        indices = ((s['boxes'] / torch.tensor([w, h, w, h])).clamp(0, 1) * (model.feedback.bins - 1)).round().long()
+                        for d in range(4): active[d].update(indices[:, d].tolist())
+                    active = [sorted(x) for x in active]
+                    init = {n: v.detach().clone() for n, v in measured_parameters(model.feedback, active)}
+                    shadow = copy.deepcopy(model.feedback)
+                    optimizer = torch.optim.SGD(model.feedback.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
+                    decay = torch.optim.SGD(shadow.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
+                    before = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
+                    generator = torch.Generator().manual_seed(seed + 1000)
+                    row = {'seed': seed, 'arm': arm, 'before': before, 'initial_gradients': {}, 'finite': True}
+                    for step in range(p['steps']):
+                        if step % (len(fit) // p['batch_size']) == 0:
+                            order = torch.randperm(len(fit), generator=generator).tolist()
+                        pos = (step * p['batch_size']) % len(fit)
+                        x, y, c = batch([fit[i] for i in order[pos:pos + p['batch_size']]], a.device)
+                        optimizer.zero_grad(set_to_none=True)
+                        loss = model(x, y, c)['total_loss']; loss.backward()
+                        finite = bool(torch.isfinite(loss)) and all(v.grad is not None and bool(torch.isfinite(v.grad).all()) for v in model.feedback.parameters())
+                        if not finite:
+                            row['finite'] = False; break
+                        if step == 0:
+                            for name, param in model.feedback.named_parameters():
+                                if name in init:
+                                    grad = param.grad[active[int(name.split('.')[1])]] if name.startswith('coordinate.') else param.grad
+                                    row['initial_gradients'][name] = float(grad.square().mean().sqrt())
+                        optimizer.step()
+                        for value in shadow.parameters(): value.grad = torch.zeros_like(value)
+                        decay.step()
+                        entry = {'seed': seed, 'arm': arm, 'step': step + 1, 'loss': float(loss.detach())}
+                        log.write(json.dumps(entry) + '\n'); log.flush()
+                        if step == 0 or (step + 1) % 20 == 0:
+                            print(json.dumps(entry), flush=True)
+                    after = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
+                    decay_values = dict(measured_parameters(shadow, active))
+                    updates = {}
+                    for name, param in measured_parameters(model.feedback, active):
+                        scale = init[name].square().mean().sqrt().clamp_min(1e-6)
+                        updates[name] = float((param.detach() - decay_values[name].detach()).square().mean().sqrt() / scale)
+                    f, c = after['fit'], after['check']; gates = p['gates_every_seed_both']
+                    diagnostics = {
+                        'finite': row['finite'], 'detector_bitwise_unchanged': detector_hash == state_hash(model.detector),
+                        'fit_relative_loss_reduction': 1 - f['correct']['mean_loss'] / before['fit']['correct']['mean_loss'],
+                        'fit_final_improvement_over_off': 1 - f['correct']['mean_loss'] / f['off']['mean_loss'],
+                        'check_final_loss_over_off': c['correct']['mean_loss'] / c['off']['mean_loss'],
+                        'fit_shifted_loss_margin_relative': (f['shifted']['mean_loss'] - f['correct']['mean_loss']) / f['correct']['mean_loss'],
+                        'check_shifted_loss_margin_relative': (c['shifted']['mean_loss'] - c['correct']['mean_loss']) / c['correct']['mean_loss'],
+                        'task_update_relative_rms': updates}
+                    delta_list = before['fit']['correct']['deltas'] + before['check']['correct']['deltas'] + f['correct']['deltas'] + c['correct']['deltas']
+                    checks = {'finite': diagnostics['finite'], 'detector_unchanged': diagnostics['detector_bitwise_unchanged'],
+                              'fit_learning': diagnostics['fit_relative_loss_reduction'] >= gates['fit_relative_loss_reduction_min'],
+                              'fit_beats_off': diagnostics['fit_final_improvement_over_off'] >= gates['fit_final_improvement_over_off_min'],
+                              'check_no_harm': diagnostics['check_final_loss_over_off'] <= gates['check_final_loss_over_off_max'],
+                              'fit_correct_history': diagnostics['fit_shifted_loss_margin_relative'] >= gates['fit_shifted_loss_margin_relative_min'],
+                              'check_correct_history': diagnostics['check_shifted_loss_margin_relative'] >= gates['check_shifted_loss_margin_relative_min'],
+                              'effective_updates': all(v >= gates['task_update_relative_rms_min'] for v in updates.values()),
+                              'initial_upstream_gradients': all(v > 0 for v in row['initial_gradients'].values()),
+                              'bounded_nontrivial_residual': all(gates['delta_normalized_rms_min'] <= d['rms'] <= gates['delta_normalized_rms_max'] and d['max_abs'] <= gates['delta_normalized_maxabs_max'] for d in delta_list)}
+                    row.update(after=after, diagnostics=diagnostics, gates=checks, passed=all(checks.values()), completed_steps=step + 1)
+                    if arm in p.get('audit_arms', []):
+                        from .history_audit import audit_history
+                        row['history_audit'] = {'fit': audit_history(model, fit, a.device), 'check': audit_history(model, check, a.device)}
+                    result['runs'].append(row)
+                    (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+                    print(json.dumps({'seed': seed, 'arm': arm, 'gates': checks, 'diagnostics': diagnostics}), flush=True)
+                    del model, shadow, optimizer, decay, init, x, y, loss
+                    if str(a.device).startswith('cuda'): torch.cuda.empty_cache()
+                except Exception:
+                    failure = {'seed': seed, 'arm': arm, 'passed': False, 'error': traceback.format_exc()}
+                    result['runs'].append(failure)
+                    (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+                    print(json.dumps(failure), flush=True)
+                    model = shadow = optimizer = decay = init = x = y = loss = None
+                    gc.collect()
+                    if str(a.device).startswith('cuda'): torch.cuda.empty_cache()
     both = [r for r in result['runs'] if r['arm'] == 'both']
     result.update(passed=len(both) == len(p['seeds']) and all(r['passed'] for r in both), elapsed_seconds=time.monotonic() - started)
     (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
