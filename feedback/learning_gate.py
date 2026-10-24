@@ -72,6 +72,16 @@ def measured_parameters(module, active):
             yield name, value
 
 
+@torch.no_grad()
+def fixed_loss_audit(model, samples, device):
+    from .fixed_matching import fixed_matching_loss
+    values=[]
+    for sample in samples:
+        x,y,c=batch([sample],device)
+        values.append(float(fixed_matching_loss(model,x,y,c)['total_loss']))
+    return {'mean_loss':sum(values)/len(values),'per_frame_losses':values}
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--protocol', type=Path, required=True)
@@ -92,6 +102,10 @@ def main():
         data = DetectionPairs(a.data_root, [seq], config['input_size'])
         fit.extend(data[i - 1] for i in p['fit_frames'])
         check.extend(data[i - 1] for i in p['check_frames'])
+    dev=[]
+    for seq in p.get('dev_sequences',[]):
+        data=DetectionPairs(a.data_root,[seq],config['input_size'])
+        dev.extend(data[i-1] for i in p['dev_frames'])
     result = {'protocol_sha256': digest(a.protocol), 'config_sha256': digest(a.config),
               'code_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
               'code_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()),
@@ -103,6 +117,10 @@ def main():
             for arm, settings in p['arms'].items():
                 try:
                     torch.manual_seed(seed)
+                    settings=copy.deepcopy(settings)
+                    assignment=settings.pop('training_assignment','dynamic')
+                    if assignment not in ('dynamic','fixed_off'):
+                        raise ValueError('Unknown training assignment')
                     cfg = copy.deepcopy(config); cfg['prompt'].update(settings)
                     model = build(cfg, a.checkpoint).to(a.device).train()
                     model.detector.requires_grad_(False)
@@ -120,15 +138,24 @@ def main():
                     optimizer = torch.optim.SGD(model.feedback.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
                     decay = torch.optim.SGD(shadow.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
                     before = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
+                    if dev: before['dev']=evaluate(model,dev,a.device)
                     generator = torch.Generator().manual_seed(seed + 1000)
-                    row = {'seed': seed, 'arm': arm, 'before': before, 'initial_gradients': {}, 'finite': True}
+                    row = {'seed': seed, 'arm': arm, 'before': before, 'initial_gradients': {}, 'finite': True,
+                           'training_assignment':assignment,'initial_feedback_hash':state_hash(model.feedback)}
+                    if p.get('fixed_loss_audit'):
+                        row['fixed_loss_before']={k:fixed_loss_audit(model,v,a.device) for k,v in [('fit',fit),('check',check),('dev',dev)] if v}
                     for step in range(p['steps']):
                         if step % (len(fit) // p['batch_size']) == 0:
                             order = torch.randperm(len(fit), generator=generator).tolist()
                         pos = (step * p['batch_size']) % len(fit)
                         x, y, c = batch([fit[i] for i in order[pos:pos + p['batch_size']]], a.device)
                         optimizer.zero_grad(set_to_none=True)
-                        loss = model(x, y, c)['total_loss']; loss.backward()
+                        if assignment=='fixed_off':
+                            from .fixed_matching import fixed_matching_loss
+                            loss=fixed_matching_loss(model,x,y,c)['total_loss']
+                        else:
+                            loss = model(x, y, c)['total_loss']
+                        loss.backward()
                         finite = bool(torch.isfinite(loss)) and all(v.grad is not None and bool(torch.isfinite(v.grad).all()) for v in model.feedback.parameters())
                         if not finite:
                             row['finite'] = False; break
@@ -141,10 +168,12 @@ def main():
                         for value in shadow.parameters(): value.grad = torch.zeros_like(value)
                         decay.step()
                         entry = {'seed': seed, 'arm': arm, 'step': step + 1, 'loss': float(loss.detach())}
+                        entry['samples']=[[fit[i]['sequence'],fit[i]['frame']] for i in order[pos:pos+p['batch_size']]]
                         log.write(json.dumps(entry) + '\n'); log.flush()
                         if step == 0 or (step + 1) % 20 == 0:
                             print(json.dumps(entry), flush=True)
                     after = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
+                    if dev: after['dev']=evaluate(model,dev,a.device)
                     decay_values = dict(measured_parameters(shadow, active))
                     updates = {}
                     for name, param in measured_parameters(model.feedback, active):
@@ -170,6 +199,21 @@ def main():
                               'initial_upstream_gradients': all(v > 0 for v in row['initial_gradients'].values()),
                               'bounded_nontrivial_residual': all(gates['delta_normalized_rms_min'] <= d['rms'] <= gates['delta_normalized_rms_max'] and d['max_abs'] <= gates['delta_normalized_maxabs_max'] for d in delta_list)}
                     row.update(after=after, diagnostics=diagnostics, gates=checks, passed=all(checks.values()), completed_steps=step + 1)
+                    if dev:
+                        d=after['dev'];dc=d['correct']['mean_loss'];do=d['off']['mean_loss'];ds=d['shifted']['mean_loss']
+                        row['dev_diagnostics']={'loss_over_off':dc/do,'shifted_loss_margin_relative':(ds-dc)/dc}
+                        row['dev_regression_gates']={
+                            'no_harm':dc/do<=gates['check_final_loss_over_off_max'],
+                            'correct_history':(ds-dc)/dc>=gates['check_shifted_loss_margin_relative_min'],
+                            'bounded_nontrivial_residual':all(gates['delta_normalized_rms_min']<=z['rms']<=gates['delta_normalized_rms_max'] and z['max_abs']<=gates['delta_normalized_maxabs_max'] for z in before['dev']['correct']['deltas']+d['correct']['deltas'])}
+                    if p.get('fixed_loss_audit'):
+                        row['fixed_loss_after']={k:fixed_loss_audit(model,v,a.device) for k,v in [('fit',fit),('check',check),('dev',dev)] if v}
+                    if p.get('save_diagnostic_feedback'):
+                        path=a.output/f'probe_seed{seed}_{arm}.pt'
+                        torch.save({'feedback':model.feedback.state_dict(),'feedback_config':cfg,
+                            'base_checkpoint_sha256':p['checkpoint_sha256'],'diagnostic_only':True,
+                            'seed':seed,'arm':arm,'steps':step+1},path)
+                        row['diagnostic_feedback']={'path':path.name,'sha256':digest(path)}
                     if arm in p.get('audit_arms', []):
                         from .history_audit import audit_history
                         row['history_audit'] = {'fit': audit_history(model, fit, a.device), 'check': audit_history(model, check, a.device)}
@@ -186,8 +230,10 @@ def main():
                     model = shadow = optimizer = decay = init = x = y = loss = None
                     gc.collect()
                     if str(a.device).startswith('cuda'): torch.cuda.empty_cache()
-    both = [r for r in result['runs'] if r['arm'] == 'both']
+    both = [r for r in result['runs'] if r['arm'] == p.get('candidate_arm','both')]
     result.update(passed=len(both) == len(p['seeds']) and all(r['passed'] for r in both), elapsed_seconds=time.monotonic() - started)
+    if dev:
+        result['dev_regression_passed']=len(both)==len(p['seeds']) and all(all(r.get('dev_regression_gates',{'missing':False}).values()) for r in both)
     (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({'passed': result['passed'], 'seconds': result['elapsed_seconds']}), flush=True)
 
