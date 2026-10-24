@@ -12,8 +12,12 @@ from torch.nn import functional as F
 
 class PriorPrompt(nn.Module):
     def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False, content_score="scaled_dot",
-                 backprojection="mean", projection_init_gain=0., spatial_score="learned_fourier"):
+                 backprojection="mean", projection_init_gain=0., spatial_score="learned_fourier",
+                 value_content="raw"):
         super().__init__()
+        if value_content not in ("raw", "patch_detail"):
+            raise ValueError("Unknown value content")
+        self.value_content = value_content
         if content_score not in ("scaled_dot", "cosine"):
             raise ValueError("Unknown content score")
         if backprojection not in ("mean", "patch_mean_compensated", "peak_coverage"):
@@ -65,11 +69,27 @@ class PriorPrompt(nn.Module):
         patches = self.patch_embed(padded).flatten(2).transpose(1, 2)[0]
         q = self.encode_query(boxes, ids, h, w)
         attention = self.attention(q, patches, h, w, boxes)
-        prompt = attention @ self.value(patches)  # PPTracker Eq. (1), N x D
+        prompt = attention @ self.patch_values(padded, patches)
         grid = self.backproject(attention, prompt)
         delta = F.fold(self.to_patch(grid).T.unsqueeze(0), padded.shape[-2:],
                        kernel_size=self.patch, stride=self.patch)
         return image + delta[:, :, :h, :w]  # Eq. (2), before backbone
+
+    def patch_values(self, padded, patches):
+        """Content-only ablation; Q/K still receive the original image tokens.
+
+        Subtract the response to each patch's per-channel mean. Both affine
+        constants cancel as well: V(X)-V(mean(X)) = Wv We (X-mean(X)).
+        No RMS normalization, gain, new parameters, or change of attention.
+        Means include the existing zero padding on partial boundary patches.
+        """
+        values = self.value(patches)
+        if self.value_content == "raw":
+            return values
+        means = F.avg_pool2d(padded, self.patch, stride=self.patch)
+        mean_image = means.repeat_interleave(self.patch, -2).repeat_interleave(self.patch, -1)
+        mean_patches = self.patch_embed(mean_image).flatten(2).transpose(1, 2)[0]
+        return values - self.value(mean_patches)
 
     def backproject(self, attention, prompt):
         """Declared migration bridge; compensate uniform 1/M spatial dilution.

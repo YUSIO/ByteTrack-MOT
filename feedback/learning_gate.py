@@ -1,4 +1,4 @@
-"""Finite-budget real detection-loss diagnostic; never produces trainable checkpoints."""
+"""Finite-budget real detection-loss diagnostic; saves diagnostic-only feedback."""
 import argparse
 import copy
 import hashlib
@@ -48,16 +48,20 @@ def evaluate(model, samples, device):
     result = {}
     for variant in ('correct', 'off', 'shifted'):
         losses = []
+        components = []
         deltas = []
         for sample in samples:
             x, y, context = batch([sample], device, variant)
-            loss = model(x, y, context)['total_loss']
+            output = model(x, y, context)
+            loss = output['total_loss']
+            components.append({k: float(v) for k, v in output.items()})
             losses.append(float(loss))
             if variant == 'correct':
                 c = context[0]
                 delta = model.feedback(x, c['boxes'], c['ids']) - x if c else torch.zeros_like(x)
                 deltas.append({'rms': float(delta.square().mean().sqrt()), 'max_abs': float(delta.abs().max())})
-        result[variant] = {'mean_loss': sum(losses) / len(losses), 'per_frame_losses': losses}
+        result[variant] = {'mean_loss': sum(losses) / len(losses), 'per_frame_losses': losses,
+                           'per_frame_components': components}
         if variant == 'correct':
             result[variant]['deltas'] = deltas
     return result
@@ -80,6 +84,17 @@ def fixed_loss_audit(model, samples, device):
         x,y,c=batch([sample],device)
         values.append(float(fixed_matching_loss(model,x,y,c)['total_loss']))
     return {'mean_loss':sum(values)/len(values),'per_frame_losses':values}
+
+
+def regression_checks(before, after, gates):
+    correct, off, shifted = (after[v]['mean_loss'] for v in ('correct', 'off', 'shifted'))
+    deltas = before['correct']['deltas'] + after['correct']['deltas']
+    return {
+        'no_harm': correct / off <= gates['check_final_loss_over_off_max'],
+        'correct_history': (shifted - correct) / correct >= gates['check_shifted_loss_margin_relative_min'],
+        'bounded_nontrivial_residual': all(
+            gates['delta_normalized_rms_min'] <= z['rms'] <= gates['delta_normalized_rms_max']
+            and z['max_abs'] <= gates['delta_normalized_maxabs_max'] for z in deltas)}
 
 
 def main():
@@ -106,11 +121,24 @@ def main():
     for seq in p.get('dev_sequences',[]):
         data=DetectionPairs(a.data_root,[seq],config['input_size'])
         dev.extend(data[i-1] for i in p['dev_frames'])
+    extra_groups = {}
+    for name, spec in p.get('additional_check_groups', {}).items():
+        if name in ('fit', 'check', 'dev'):
+            raise ValueError('Additional group cannot replace an original group')
+        samples = []
+        for seq in spec['sequences']:
+            data = DetectionPairs(a.data_root, [seq], config['input_size'])
+            samples.extend(data[i-1] for i in spec['frames'])
+        if not samples:
+            raise ValueError('Empty regression group')
+        extra_groups[name] = samples
     result = {'protocol_sha256': digest(a.protocol), 'config_sha256': digest(a.config),
               'code_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
               'code_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()),
               'python': sys.version, 'torch': str(torch.__version__), 'cuda': torch.version.cuda,
               'device': str(a.device), 'diagnostic_only': True, 'runs': []}
+    result['sample_groups'] = {k: [[s['sequence'], s['frame']] for s in v]
+        for k, v in [('fit', fit), ('check', check), ('dev', dev), *extra_groups.items()] if v}
     started = time.monotonic()
     with (a.output / 'steps.jsonl').open('w') as log:
         for seed in p['seeds']:
@@ -139,6 +167,8 @@ def main():
                     decay = torch.optim.SGD(shadow.parameters(), lr=p['lr'], momentum=p['momentum'], weight_decay=p['weight_decay'])
                     before = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
                     if dev: before['dev']=evaluate(model,dev,a.device)
+                    for name, samples in extra_groups.items():
+                        before[name] = evaluate(model, samples, a.device)
                     generator = torch.Generator().manual_seed(seed + 1000)
                     row = {'seed': seed, 'arm': arm, 'before': before, 'initial_gradients': {}, 'finite': True,
                            'training_assignment':assignment,'initial_feedback_hash':state_hash(model.feedback)}
@@ -174,6 +204,8 @@ def main():
                             print(json.dumps(entry), flush=True)
                     after = {'fit': evaluate(model, fit, a.device), 'check': evaluate(model, check, a.device)}
                     if dev: after['dev']=evaluate(model,dev,a.device)
+                    for name, samples in extra_groups.items():
+                        after[name] = evaluate(model, samples, a.device)
                     decay_values = dict(measured_parameters(shadow, active))
                     updates = {}
                     for name, param in measured_parameters(model.feedback, active):
@@ -199,6 +231,8 @@ def main():
                               'initial_upstream_gradients': all(v > 0 for v in row['initial_gradients'].values()),
                               'bounded_nontrivial_residual': all(gates['delta_normalized_rms_min'] <= d['rms'] <= gates['delta_normalized_rms_max'] and d['max_abs'] <= gates['delta_normalized_maxabs_max'] for d in delta_list)}
                     row.update(after=after, diagnostics=diagnostics, gates=checks, passed=all(checks.values()), completed_steps=step + 1)
+                    row['group_regression_gates'] = {name: regression_checks(before[name], after[name], gates)
+                        for name in ['check', *(['dev'] if dev else []), *extra_groups]}
                     if dev:
                         d=after['dev'];dc=d['correct']['mean_loss'];do=d['off']['mean_loss'];ds=d['shifted']['mean_loss']
                         row['dev_diagnostics']={'loss_over_off':dc/do,'shifted_loss_margin_relative':(ds-dc)/dc}
@@ -234,6 +268,10 @@ def main():
     result.update(passed=len(both) == len(p['seeds']) and all(r['passed'] for r in both), elapsed_seconds=time.monotonic() - started)
     if dev:
         result['dev_regression_passed']=len(both)==len(p['seeds']) and all(all(r.get('dev_regression_gates',{'missing':False}).values()) for r in both)
+    result['all_group_regressions_passed'] = len(both) == len(p['seeds']) and all(
+        bool(r.get('group_regression_gates')) and all(all(g.values()) for g in r['group_regression_gates'].values())
+        for r in both)
+    result['small_scale_candidate_passed'] = result['passed'] and result['all_group_regressions_passed']
     (a.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({'passed': result['passed'], 'seconds': result['elapsed_seconds']}), flush=True)
 
