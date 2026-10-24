@@ -151,6 +151,18 @@ def serialise_hota_result(result, metric):
     return summary
 
 
+def strict_mot_accumulator(gt_frames, tracker_frames, iou_threshold=0.5):
+    """Explicit GT/result frame union, including prediction-only frames."""
+    acc = mm.MOTAccumulator(auto_id=True)
+    for frame in sorted(set(gt_frames) | set(tracker_frames)):
+        gt, pred = gt_frames.get(frame, []), tracker_frames.get(frame, [])
+        similarities = iou_matrix(gt, pred)
+        distances = 1.0 - similarities
+        distances[similarities < iou_threshold] = np.nan
+        acc.update([b[0] for b in gt], [b[0] for b in pred], distances)
+    return acc
+
+
 def main():
     args = parse_args()
     sequence_dirs = sorted(path for path in (args.dataset_root / args.split).glob("UAVSwarm-*") if path.is_dir())
@@ -171,10 +183,9 @@ def main():
         tracker_path = args.tracker_results / f"{sequence_name}.txt"
         if not tracker_path.is_file():
             raise FileNotFoundError(f"missing tracker result {tracker_path}")
-        gt_for_motmetrics = mm.io.loadtxt(str(gt_path), fmt="mot15-2D", min_confidence=1)
-        tracker_for_motmetrics = mm.io.loadtxt(str(tracker_path), fmt="mot15-2D", min_confidence=-1)
         mot_accumulators.append(
-            mm.utils.compare_to_groundtruth(gt_for_motmetrics, tracker_for_motmetrics, "iou", distth=args.iou_threshold)
+            strict_mot_accumulator(read_mot_boxes(gt_path, 1.0),
+                                   read_mot_boxes(tracker_path, -1.0), args.iou_threshold)
         )
         sequence_names.append(sequence_name)
         hota_by_sequence[sequence_name] = HOTA().eval_sequence(
@@ -195,6 +206,7 @@ def main():
     output = {
         "units": {"rates": "percent", "counts": "events or detections"},
         "protocol": {
+            "frame_policy": "strict_union_of_gt_and_prediction_frames",
             "clear_and_identity_iou_threshold": args.iou_threshold,
             "hota_implementation": "TrackEval 1.1.0 HOTA over IoU thresholds 0.05 through 0.95",
         },

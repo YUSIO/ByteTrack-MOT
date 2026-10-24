@@ -69,6 +69,7 @@ def parse_args():
     parser.add_argument("--gmc-dir", type=Path,
                         help="directory with <sequence>.txt camera-motion files: frame a b tx c d ty per row, "
                              "mapping frame-1 to frame; applied to every predicted track state")
+    parser.add_argument("--swarm-residual", choices=("off", "shadow", "apply"), default="off")
     return parser.parse_args()
 
 
@@ -145,6 +146,14 @@ def track_sequence(sequence_dir, output_dir, args):
         for row in np.loadtxt(args.gmc_dir / f"{info['name']}.txt", ndmin=2):
             args.gmc_warps[int(row[0])] = row[1:7].reshape(2, 3)
     tracker = BYTETracker(args, frame_rate=info["frame_rate"])
+    residual_mode = args.swarm_residual
+    if residual_mode != "off":
+        if args.gmc_dir is None or args.lost_projection != "off":
+            raise ValueError("swarm residual requires GMC and disables legacy projection")
+        from yolox.tracker.swarm_residual import SwarmResidual
+        args.swarm_residual = SwarmResidual(info["width"], info["height"], mode=residual_mode)
+    else:
+        args.swarm_residual = None
     result_rows = []
     input_count = 0
 
@@ -168,6 +177,9 @@ def track_sequence(sequence_dir, output_dir, args):
 
     if args.lost_projector is not None:
         args.lost_projector.close()
+    if args.swarm_residual is not None:
+        args.swarm_residual.save(output_dir / f"{info['name']}.residual.json")
+    args.swarm_residual = residual_mode
     write_sequence_results(output_dir / f"{info['name']}.txt", result_rows)
     return {
         "input_detection_rows": input_count,
@@ -201,6 +213,7 @@ def main():
             "min_box_area": args.min_box_area,
             "aspect_ratio_thresh": args.aspect_ratio_thresh,
             "mot20": args.mot20,
+            "swarm_residual": args.swarm_residual,
             "affinity_checkpoint": str(args.affinity_checkpoint) if args.affinity_checkpoint else None,
             "affinity_device": args.affinity_device if args.affinity_checkpoint else None,
             "affinity_weight": args.affinity_weight if args.affinity_checkpoint else None,

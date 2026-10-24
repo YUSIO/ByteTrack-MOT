@@ -244,6 +244,9 @@ class BYTETracker(object):
         if adjuster is not None:
             dists = adjuster("primary", strack_pool, detections, dists, self.frame_id)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
+        swarm_residual = getattr(self.args, "swarm_residual", None)
+        if swarm_residual is not None:
+            swarm_residual.collect(strack_pool, detections, matches, self.frame_id)
         if projector is not None:
             projector.after_first_association(strack_pool, detections, matches, self.frame_id)
 
@@ -323,6 +326,8 @@ class BYTETracker(object):
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         if projector is not None:
             projector.end_frame(self.lost_stracks, self.frame_id)
+        if swarm_residual is not None:
+            swarm_residual.correct(self.lost_stracks, self.frame_id)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
 
