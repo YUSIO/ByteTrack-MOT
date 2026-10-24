@@ -32,12 +32,17 @@ def main():
     state = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
     if config['mode'] != 'none' and 'feedback_config' not in state and not args.allow_untrained_feedback:
         p.error('Feedback weights are absent; random modules are only permitted in explicit preflight')
+    if state.get('metadata', {}).get('preflight') and not args.allow_untrained_feedback:
+        p.error('Preflight detector checkpoint requires --allow-untrained-feedback')
     model = build(config, args.checkpoint).to(args.device).eval()
     predictor = None
     if config['mode'] == 'eec':
         from .psmp import load_psmp
         if args.psmp_checkpoint is None:
             p.error('--psmp-checkpoint is required for EEC')
+        prior_state = torch.load(args.psmp_checkpoint, map_location='cpu', weights_only=True)
+        if prior_state.get('metadata', {}).get('preflight') and not args.allow_untrained_feedback:
+            p.error('Preflight PSMP checkpoint requires --allow-untrained-feedback')
         predictor = load_psmp(args.psmp_checkpoint, config['psmp']).to(args.device)
     args.output.mkdir(parents=True, exist_ok=False)
     summary = {'config': config, 'checkpoint_sha256': sha256(args.checkpoint),

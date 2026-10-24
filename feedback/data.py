@@ -1,4 +1,4 @@
-"""Explicit train-only teacher-forcing data; never imported by online inference."""
+"""Image IO plus explicit train-only teacher-forcing datasets; inference never calls GT loaders."""
 import configparser
 from pathlib import Path
 import cv2
