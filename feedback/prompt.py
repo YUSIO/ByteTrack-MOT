@@ -11,8 +11,11 @@ from torch.nn import functional as F
 
 
 class PriorPrompt(nn.Module):
-    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096):
+    def __init__(self, dim=64, patch=16, bins=1024, max_ids=4096, position_encoding=False):
         super().__init__()
+        self.position_encoding = position_encoding
+        if position_encoding and dim % 4:
+            raise ValueError("2D Fourier position encoding requires dim divisible by 4")
         self.dim, self.patch, self.bins, self.max_ids = dim, patch, bins, max_ids
         self.coordinate = nn.ModuleList([nn.Embedding(bins, dim) for _ in range(4)])
         self.identity = nn.Embedding(max_ids, dim)
@@ -40,16 +43,37 @@ class PriorPrompt(nn.Module):
         if not torch.isfinite(boxes).all() or (boxes[:, 2:] <= 0).any():
             raise ValueError('Invalid prompt boxes')
         h, w = image.shape[-2:]
-        norm = boxes / boxes.new_tensor([w, h, w, h])
-        index = (norm.clamp(0, 1) * (self.bins - 1)).round().long()
-        q = self.identity(ids.long())
-        for i, embedding in enumerate(self.coordinate):
-            q = q + embedding(index[:, i])
         padded = F.pad(image, (0, (-w) % self.patch, 0, (-h) % self.patch))
         patches = self.patch_embed(padded).flatten(2).transpose(1, 2)[0]
-        attention = (q @ self.key(patches).T / math.sqrt(self.dim)).softmax(-1)
+        q = self.encode_query(boxes, ids, h, w)
+        attention = self.attention(q, patches, h, w)
         prompt = attention @ self.value(patches)  # PPTracker Eq. (1), N x D
         grid = attention.T @ prompt / len(boxes)  # declared shape-completion choice
         delta = F.fold(self.to_patch(grid).T.unsqueeze(0), padded.shape[-2:],
                        kernel_size=self.patch, stride=self.patch)
         return image + delta[:, :, :h, :w]  # Eq. (2), before backbone
+
+    def encode_query(self, boxes, ids, h, w):
+        norm = boxes / boxes.new_tensor([w, h, w, h])
+        index = (norm.clamp(0, 1) * (self.bins - 1)).round().long()
+        q = self.identity(ids.long())
+        for i, embedding in enumerate(self.coordinate):
+            q = q + embedding(index[:, i])
+        return q
+
+    def patch_positions(self, h, w, reference):
+        # Positions describe patch centers in the unpadded detector-input frame.
+        rows, cols = math.ceil(h / self.patch), math.ceil(w / self.patch)
+        y, x = torch.meshgrid(torch.arange(rows, device=reference.device),
+                              torch.arange(cols, device=reference.device), indexing='ij')
+        xy = torch.stack(((x + .5) * self.patch / w,
+                          (y + .5) * self.patch / h), dim=-1).reshape(-1, 2).to(reference)
+        frequency = torch.arange(1, self.dim // 4 + 1, device=reference.device).to(reference)
+        phase = 2 * math.pi * xy[..., None] * frequency
+        return torch.cat((phase.sin(), phase.cos()), dim=-1).flatten(1)
+
+    def attention(self, q, patches, h, w):
+        keys = self.key(patches)
+        if self.position_encoding:
+            keys = keys + self.patch_positions(h, w, keys)
+        return (q @ keys.T / math.sqrt(self.dim)).softmax(-1)
