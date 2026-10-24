@@ -22,7 +22,7 @@ from .weak import (WeakDetector, WeakOnline, CausalState, DetectionTracker,
                    heat_from_record, postprocess_rows, render, select_rows)
 from .weak_history import sha256, train_batch
 
-REFERENCE = '7f7405b65fe022266ffb5197e32ec1545ea4011d'
+REFERENCE = '46820526c6477c3498ae596711df7fc9fb7633f6'
 
 
 def dump(path, value):
@@ -157,9 +157,9 @@ def coverage(root, protocol, output, manifest):
             for i in u:
                 summary['U_fully_covered']+=int(not torch.any(render(dets[[i]],ratio)>ht))
                 all_scores.append(float(dets[i,4]))
-            summary['low_consumed']+=sum(.1<d[4]<.6 and a['consumed_by'] is not None for d,a in zip(dets,audit))
-            summary['high_unconsumed']+=sum(d[4]>=.6 and a['consumed_by'] is None for d,a in zip(dets,audit))
-            summary['unconfirmed_consumed']+=sum(a['consumed_by'] is not None and not a['output_confirmed'] for a in audit)
+            summary['low_consumed']+=int(sum(.1<d[4]<.6 and a['consumed_by'] is not None for d,a in zip(dets,audit)))
+            summary['high_unconsumed']+=int(sum(d[4]>=.6 and a['consumed_by'] is None for d,a in zip(dets,audit)))
+            summary['unconfirmed_consumed']+=int(sum(a['consumed_by'] is not None and not a['output_confirmed'] for a in audit))
             records.append({'frame':frame,'detections':dets.tolist(),'audit':audit,'t':t,'u':u,
                             'tracks':tracks,'incremental_pixels':incremental})
         dest=output/'output'/name;dest.mkdir()

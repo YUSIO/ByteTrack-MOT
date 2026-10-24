@@ -69,6 +69,15 @@ class Eligibility(unittest.TestCase):
                     np.testing.assert_array_equal(x.mean,y.mean)
                     np.testing.assert_array_equal(x.covariance,y.covariance)
 
+    def test_canonical_Exp141_tracker_equivalence(self):
+        from feedback.weak_check import reference_tracker_class
+        tr, ref = DetectionTracker(), DetectionTracker(False,reference_tracker_class())
+        rng=np.random.default_rng(163)
+        for frame in range(30):
+            d=rows([det(i*30+frame*.5,float(rng.choice([.05,.3,.65,.9]))) for i in range(5)])
+            left,_=tr.update(d,(800,1440));right,_=ref.update(d,(800,1440))
+            self.assertEqual(left,right)
+
 
 class Causality(unittest.TestCase):
     def test_future_and_cross_sequence_rejected(self):
