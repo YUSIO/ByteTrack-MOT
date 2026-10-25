@@ -7,6 +7,7 @@ P0 is explicitly experimental (not specified in paper); sensitivity is preregist
 import numpy as np
 from fctrack.tracker import FCTrack, iou_matrix
 from fctrack.relink import carry
+from fctrack.relabel_reliability import form_spread, saved_centre
 
 class RelativeEdges:
     def __init__(self, p0=9.):
@@ -55,6 +56,7 @@ class ScorRelabelTrack(FCTrack):
         self.relative = RelativeEdges(self.relab.get("p0",9.))
         self.lastbox = {}
         self.relabel_events = []
+        self.reliability_history = {}
     def step(self,*args,**kwargs):
         self.relative.predict(self.frame+1)
         rows = super().step(*args,**kwargs)
@@ -62,6 +64,10 @@ class ScorRelabelTrack(FCTrack):
         self.relative.observe(centres,self.lastw,self.relab["gap"])
         for tid,b,_ in rows:
             if b[2]*b[3]>0:self.lastbox[tid]=b.copy()
+        self.reliability_history[self.frame] = {tid:saved_centre(b) for tid,b,_ in rows if b[2]*b[3]>0}
+        for f in list(self.reliability_history):
+            if f < self.frame-self.relab['gap']-1:
+                del self.reliability_history[f]
         return rows
     def prediction(self,family,c1,side1,f1,f,L,cur):
         ref = self.hist.get(f1,{})
@@ -75,12 +81,13 @@ class ScorRelabelTrack(FCTrack):
         if not births or f==1:return
         now={row[0] for row in rows}
         cur={row[0]:row[1][:2]+row[1][2:]/2 for row in rows if row[0] in self.lastw}
+        relcur={row[0]:saved_centre(row[1]) for row in rows if row[0] in self.lastw}
         lost={t.track_id for t in self.t.lost_stracks}
         removed={t.track_id for t in self.t.removed_stracks}
         pairs=[];logs=[]
         for i,k in enumerate(births):
             b=rows[k][1];c0=b[:2]+b[2:]/2;side=float(np.sqrt(max(b[2]*b[3],1.)))
-            e=dict(frame=f,new_id=int(rows[k][0]),box=b.tolist(),candidates=[],chosen=None)
+            e=dict(frame=f,new_id=int(rows[k][0]),box=b.tolist(),candidates=[],chosen=None,pre_veto_chosen=None,reliability_rejected=False)
             logs.append(e)
             for L,(f1,c1,side1) in self.lastw.items():
                 if L in now or not 1<=f-f1<=r["gap"]:continue
@@ -91,14 +98,24 @@ class ScorRelabelTrack(FCTrack):
                     predictions[family]=dict(centre=p.tolist(),distance=float(np.linalg.norm(p-c0))/side,
                         iou=float(iou_matrix([bb],[b])[0,0]),anchor=anchor,peers=n)
                 pred=predictions[r["family"]];d=pred["distance"]
+                spread, npeer = form_spread(L,c1,side1,self.reliability_history.get(f1,{}),relcur)
                 admissible=d<=r["tau"] and (r.get("gate","distance")=="distance" or pred["iou"]>np.exp(-4))
                 e["candidates"].append(dict(id=int(L),last_frame=f1,gap=f-f1,last_box=self.lastbox[L].tolist(),
-                    pool="Lost" if L in lost else "Removed" if L in removed else "history",predictions=predictions,admissible=bool(admissible)))
+                    pool="Lost" if L in lost else "Removed" if L in removed else "history",predictions=predictions,admissible=bool(admissible),form_spread=spread,form_spread_peers=npeer))
                 if admissible:pairs.append((d,i,L))
         done_i,done_L=set(),set()
         for d,i,L in sorted(pairs):
             if i in done_i or L in done_L:continue
             done_i.add(i);done_L.add(L)
+            logs[i]['pre_veto_chosen'] = int(L)
+            candidate = next(c for c in logs[i]['candidates'] if c['id']==L)
+            threshold = r.get('spread_veto_threshold')
+            if threshold is not None and candidate['form_spread'] is not None and candidate['form_spread'] > threshold:
+                # Veto the original greedy assignment; do not retry another ID
+                # or reallocate the reserved ID to a different birth this frame.
+                logs[i]['reliability_rejected'] = True
+                self.stats['relabel_spread_vetoed'] += 1
+                continue
             row=rows[births[i]]
             self.t.lost_stracks=[x for x in self.t.lost_stracks if x.track_id!=L]
             self.t.removed_stracks=[x for x in self.t.removed_stracks if x.track_id!=L]
