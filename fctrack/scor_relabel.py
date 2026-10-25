@@ -8,6 +8,7 @@ import numpy as np
 from fctrack.tracker import FCTrack, iou_matrix
 from fctrack.relink import carry
 from fctrack.relabel_reliability import form_spread, saved_centre
+from fctrack.relabel_probability import evidence
 
 class RelativeEdges:
     def __init__(self, p0=9.):
@@ -109,6 +110,15 @@ class ScorRelabelTrack(FCTrack):
             done_i.add(i);done_L.add(L)
             logs[i]['pre_veto_chosen'] = int(L)
             candidate = next(c for c in logs[i]['candidates'] if c['id']==L)
+            probability = r.get('probability_veto')
+            if probability is not None:
+                assert r.get('spread_veto_threshold') is None
+                result = evidence(d,candidate['form_spread'],probability)
+                logs[i]['probability_evidence'] = result
+                if result['rejected']:
+                    logs[i]['reliability_rejected'] = True
+                    self.stats['relabel_probability_vetoed'] += 1
+                    continue
             threshold = r.get('spread_veto_threshold')
             if threshold is not None and candidate['form_spread'] is not None and candidate['form_spread'] > threshold:
                 # Veto the original greedy assignment; do not retry another ID
