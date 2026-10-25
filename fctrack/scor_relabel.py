@@ -7,6 +7,7 @@ P0 is explicitly experimental (not specified in paper); sensitivity is preregist
 import numpy as np
 from fctrack.tracker import FCTrack, iou_matrix
 from fctrack.relink import carry
+from fctrack.formation import select_neighbours
 
 class RelativeEdges:
     def __init__(self, p0=9.):
@@ -49,6 +50,33 @@ class RelativeEdges:
         r = c1-reference[j] if offset else self.edges[label,j][0][:2]
         return current[j]+r, int(j), len(peers)
 
+    def estimate_local(self, label, current, reference, c1, side1, multi=True):
+        """Exp169: same Delaunay pool for local-single and multi-relative-CV.
+
+        Fuse point estimates only: edge covariances share measurements and are
+        not independent evidence. No covariance multiplication is performed.
+        """
+        if label not in reference:
+            return c1.copy(), [], 0, [], 0.
+        ids = list(reference)
+        points = np.array([reference[j] for j in ids])
+        available = np.array([j != label and j in current and (label,j) in self.edges for j in ids])
+        nb = select_neighbours(points, ids.index(label), available, "delaunay", 6)
+        peers = [ids[k] for k in nb]
+        if not peers:
+            return c1.copy(), [], 0, [], 0.
+        if not multi:
+            j = min(peers, key=lambda j:(np.linalg.norm(self.edges[label,j][0][2:]),j))
+            return current[j]+self.edges[label,j][0][:2], [int(j)], len(peers), [1.], 0.
+        each = np.array([current[j]+self.edges[label,j][0][:2] for j in peers])
+        spread = float(np.linalg.norm(each[:,None]-each[None,:],axis=2).max())
+        if len(peers)==1 or spread<=.5*side1:
+            weights = np.ones(len(peers))/len(peers)
+        else:
+            weights = 1./np.maximum(np.linalg.norm(points[nb]-c1,axis=1),1e-6)
+            weights /= weights.sum()
+        return (weights[:,None]*each).sum(0), [int(j) for j in peers], len(peers), weights.tolist(), spread
+
 class ScorRelabelTrack(FCTrack):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
@@ -65,6 +93,9 @@ class ScorRelabelTrack(FCTrack):
         return rows
     def prediction(self,family,c1,side1,f1,f,L,cur):
         ref = self.hist.get(f1,{})
+        if family in ("scor_local","scor_multi"):
+            p,anchors,n,weights,spread = self.relative.estimate_local(L,cur,ref,c1,side1,family=="scor_multi")
+            return p,anchors,n
         if family in ("scor","scor_offset"):
             return self.relative.estimate(L,cur,ref,c1,family=="scor_offset")
         p = carry(family,c1,side1,f1,f,L,{f1:ref,f:cur},self.warps)
@@ -85,11 +116,14 @@ class ScorRelabelTrack(FCTrack):
             for L,(f1,c1,side1) in self.lastw.items():
                 if L in now or not 1<=f-f1<=r["gap"]:continue
                 predictions={}
-                for family in ("form","scor","scor_offset","abs","gmc"):
+                for family in ("form","scor","scor_offset","abs","gmc","scor_local","scor_multi"):
                     p,anchor,n=self.prediction(family,c1,side1,f1,f,L,cur)
                     bb=np.r_[p-self.lastbox[L][2:]/2,self.lastbox[L][2:]]
                     predictions[family]=dict(centre=p.tolist(),distance=float(np.linalg.norm(p-c0))/side,
                         iou=float(iou_matrix([bb],[b])[0,0]),anchor=anchor,peers=n)
+                for family in ("scor_local","scor_multi"):
+                    _,_,_,weights,spread = self.relative.estimate_local(L,cur,self.hist.get(f1,{}),c1,side1,family=="scor_multi")
+                    predictions[family].update(weights=weights,spread=spread)
                 pred=predictions[r["family"]];d=pred["distance"]
                 admissible=d<=r["tau"] and (r.get("gate","distance")=="distance" or pred["iou"]>np.exp(-4))
                 e["candidates"].append(dict(id=int(L),last_frame=f1,gap=f-f1,last_box=self.lastbox[L].tolist(),
