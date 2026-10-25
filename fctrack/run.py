@@ -80,6 +80,20 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             targs["gmc_warps"] = {int(r[0]): r[1:].reshape(2, 3) for r in w}
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
+        reid_cache = None
+        if arm.get('reid'):
+            from fctrack.reid import sha
+            reid_cache = np.load(root / arm['reid']['cache'] / f'{name}.npz')
+            assert str(reid_cache['detection_sha256']) == sha(root / cell['detections'] / name / 'det.txt')
+            reid_rows = reid_cache['row_indices']
+            assert np.array_equal(reid_rows, np.flatnonzero(raw[:, 6].astype(np.float32) > targs['track_thresh']))
+            reid_vectors = reid_cache['vectors'].copy()
+            assert np.isfinite(reid_vectors).all()
+            assert np.allclose(np.linalg.norm(reid_vectors[reid_cache['valid']], axis=1), 1, atol=1e-5)
+            if arm['reid'].get('shuffle'):
+                rng = np.random.default_rng(arm['reid']['seed'] + int(name[-2:]))
+                reid_vectors = reid_vectors[rng.permutation(len(reid_vectors))]
+            tracker.reid_spec = arm['reid']
         BaseTrack._count = 0
         fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
         if decisions_dir is not None:
@@ -131,6 +145,12 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         for frame in range(1, info["seqLength"] + 1):
             r = raw[raw[:, 0] == frame]
             det = np.column_stack((r[:, 2:4], r[:, 2:4] + r[:, 4:6], r[:, 6])).astype(np.float32)
+            if reid_cache is not None:
+                tracker.reid_current = np.zeros((len(r), 128), np.float32)
+                features = reid_vectors[raw[reid_rows, 0] == frame]
+                high = det[:, 4] > targs['track_thresh']
+                assert int(high.sum()) == len(features)
+                tracker.reid_current[high] = features
             cache = []
 
             def image():

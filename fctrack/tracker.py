@@ -225,6 +225,8 @@ class FCTrack:
                 t = self.STrack(box, det[k, 4])
                 t.activate(self.t.kalman_filter, f)
                 self.t.tracked_stracks.append(t)
+            if getattr(self.t, 'reid_spec', None) is not None:
+                t.update_reid(self.t.reid_current[k])
             t.is_activated = True
             self.meta[t.track_id] = {"obs": 1, "outlier": False, "ok": 0, "cleared": False, "real": f, "box": box.copy(),
                                      "prov": int(b.get("probation_obs", 0))}  # Exp111: real detections still needed before fill-in may keep it alive

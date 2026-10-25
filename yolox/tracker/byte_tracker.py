@@ -23,6 +23,16 @@ class STrack(BaseTrack):
         self.score = score
         self.tracklet_len = 0
 
+    def update_reid(self, feature):
+        feature = np.asarray(feature, np.float32)
+        norm = np.linalg.norm(feature)
+        if not np.isfinite(feature).all() or norm < 1e-8:
+            return
+        feature = feature / norm
+        old = getattr(self, 'reid_feature', None)
+        feature = feature if old is None else .9 * old + .1 * feature
+        self.reid_feature = feature / max(np.linalg.norm(feature), 1e-8)
+
     def record_prediction(self, max_len):
         """Keep the latest one-step Kalman predictions (centre and positional std)."""
         if not hasattr(self, 'prediction_history') or self.prediction_history.maxlen != max_len:
@@ -93,6 +103,8 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        if hasattr(new_track, 'reid_feature'):
+            self.update_reid(new_track.reid_feature)
         if hasattr(new_track, "homa_feature"):
             self.homa_feature = new_track.homa_feature
             self.homa_feature_frame = frame_id
@@ -115,6 +127,8 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        if hasattr(new_track, 'reid_feature'):
+            self.update_reid(new_track.reid_feature)
         if hasattr(new_track, "homa_feature"):
             self.homa_feature = new_track.homa_feature
             self.homa_feature_frame = frame_id
@@ -231,6 +245,14 @@ class BYTETracker(object):
         else:
             detections = []
 
+        reid = getattr(self, 'reid_spec', None)
+        if reid is not None:
+            current = self.reid_current
+            if len(current) != len(scores):
+                raise ValueError('ReID detection-row alignment mismatch')
+            for detection, feature in zip(detections, current[remain_inds]):
+                detection.update_reid(feature)
+
         homa = getattr(self, 'homa', None)
         if homa is not None and homa.current is not None:
             if len(homa.current) != len(detections):
@@ -275,6 +297,9 @@ class BYTETracker(object):
             raise ValueError('unknown first_stage_cost: {}'.format(first_stage_cost))
         if homa is None and not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
+        if reid is not None:
+            from fctrack.reid import fuse
+            dists = fuse(strack_pool, detections, dists, reid)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
         if trace is not None:
             trace.association("association_high", strack_pool, detections, high_indices, dists,
