@@ -81,7 +81,11 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             targs["gmc_warps"] = {int(r[0]): r[1:].reshape(2, 3) for r in w}
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
-        fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        tracker_class = FCTrack
+        if arm.get("relabel", {}).get("scor_audit"):
+            from fctrack.scor_relabel import ScorRelabelTrack
+            tracker_class = ScorRelabelTrack
+        fc = tracker_class(tracker, STrack, arm, verify, log=attempts_dir is not None)
         if decisions_dir is not None:
             from fctrack.decision_trace import DecisionTrace
             fc.trace = tracker.decision_trace = DecisionTrace(decisions_dir / f"{name}.jsonl.gz")
@@ -124,7 +128,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
         if claim:
             from fctrack.online_head import OnlineHead
             fc.head, fc.features, fc.seq = OnlineHead(claim, claim["seed"] + int(name[-2:]), glob), features, name
-        if arm.get("relabel", {}).get("family") == "gmc":  # Exp077: camera motion for the gmc relabel family
+        if arm.get("relabel", {}).get("family") == "gmc" or arm.get("relabel", {}).get("scor_audit"):  # Exp077: camera motion for the gmc relabel family
             w = np.loadtxt(root / cell["gmc"] / f"{name}.txt", ndmin=2)
             fc.warps = {int(r[0]): r[1:].reshape(2, 3) for r in w}
         rows = []
@@ -148,6 +152,13 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             queries_dir.mkdir(parents=True, exist_ok=True)
             (queries_dir / f"{name}.csv").write_text("kind,frame,x,y,w,h,p,rx,ry,rw,rh\n" + "".join(
                 ",".join([q[0], str(q[1])] + [repr(float(v)) for v in q[2:]]) + "\n" for q in qlog))
+        if hasattr(fc, "relabel_events"):
+            import gzip
+            event_dir = tracks.parent / "relabel_events"
+            event_dir.mkdir(exist_ok=True)
+            with gzip.open(event_dir / f"{name}.jsonl.gz", "wt") as ef:
+                for event in fc.relabel_events:
+                    ef.write(json.dumps(event) + "\n")
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
