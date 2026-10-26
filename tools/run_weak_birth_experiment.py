@@ -91,6 +91,7 @@ def main():
                   seed=cfg['seed'],host=platform.node(),python_executable=sys.executable,python=sys.version,
                   versions={k:importlib.metadata.version(k) for k in ['torch','numpy','scipy','trackeval','motmetrics','lap']},
                   start_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),test_read=False,
+                  calibration_read=bool(cfg['groups'].get('calibration')),dev_read=bool(cfg['groups'].get('dev')),
                   detector_seen_train=cfg.get('detector_seen_train',True),
                   detector_seen_scene=cfg.get('detector_seen_scene',True),
                   previous_validation_exposure=cfg.get('previous_validation_exposure',True),
@@ -105,10 +106,24 @@ def main():
         arm=dict(cfg['arm'])
         if rs['weak_birth']:arm['weak_birth']=rs['weak_birth']
         if rs.get('weak_observe_sequences') is not None:arm['weak_observe_sequences']=rs['weak_observe_sequences']
-        names,stats,digests=run_arm(root,cfg,cell,arm,r/'tracks','cpu',0)
+        names,stats,digests=run_arm(root,cfg,cell,arm,r/'tracks','cpu',0,
+            attempts_dir=r/'recovery_attempts' if rs.get('trace') else None,
+            decisions_dir=r/'decisions' if rs.get('trace') else None)
         assert names==cell['sequences']
         save(r/'stats.json',stats);save(r/'tracks_sha256.json',digests)
-        save(r/'metrics.json',evaluate(root,cfg,r/'tracks'))
+        if rs.get('reference_tracks'):
+            parity={n:digests[n]==sha(root/rs['reference_tracks']/f'{n}.txt') for n in names}
+            save(r/'reference_parity.json',parity);assert all(parity.values()),parity
+        measured=evaluate(root,cfg,r/'tracks');save(r/'metrics.json',measured)
+        if cfg.get('baseline_tracks'):
+            baseline=evaluate(root,cfg,root/cfg['baseline_tracks']);save(r/'baseline_metrics.json',baseline)
+            delta={k:measured['groups']['fit'][k]-baseline['groups']['fit'][k]
+                   for k in ['MOTA','HOTA','IDF1','FP','FN','IDSW']}
+            improved=[n for n in names if measured['per_sequence'][n]['FN']<baseline['per_sequence'][n]['FN']]
+            g=cfg['admission']
+            gates=dict(MOTA=delta['MOTA']>=g['MOTA_pp'],HOTA=delta['HOTA']>=0,IDF1=delta['IDF1']>=0,
+                       FN_sequences=len(improved)>=g['FN_sequences'],nonzero_birth=stats.get('weak_born',0)>0)
+            save(r/'admission.json',dict(delta_vs_A=delta,FN_improved_sequences=improved,gates=gates,passed=all(gates.values())))
         for p,h in inputs.items():assert sha(root/p)==h,p
         assert git('rev-parse','HEAD')==expected['commit'] and not git('status','--porcelain')
         manifest['status']='completed';rc=0

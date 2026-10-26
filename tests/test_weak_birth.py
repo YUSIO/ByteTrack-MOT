@@ -76,5 +76,31 @@ class WeakBirthTests(unittest.TestCase):
         self.assertEqual(len(rows),1);np.testing.assert_array_equal(rows[0][1],[11,10,10,10])
         self.assertAlmostEqual(rows[0][2],.3,places=6)
 
+    def configure_probation(self, count):
+        f=make('verifier');f.weak_birth.update(p_min=.97,use_regressed_box=True,probation_obs=count)
+        f.rec=dict(estimator='kalman',lookback=5,max_since_real=30,min_observations=1,
+                   iou_free=.3,skip_if_detected=False,p_min=.97,use_regressed_box=True,score=.7)
+        return f
+
+    def test_probation_blocks_recovery_only_for_weak_birth(self):
+        f=self.configure_probation(1)
+        first=f.step(np.array([[10,10,20,20,.3],[50,50,60,60,.99]],np.float32),(100,100),lambda:None)
+        weak=next(tid for tid,b,s in first if s<.6);strong=next(tid for tid,b,s in first if s>.6)
+        second=f.step(np.empty((0,5),np.float32),(100,100),lambda:None)
+        self.assertEqual([x[0] for x in second],[strong]);self.assertEqual(f.meta[weak]['prov'],1)
+        self.assertEqual(f.stats['fill_in_skipped_probation'],1)
+        f=self.configure_probation(0)
+        first=f.step(np.array([[10,10,20,20,.3]],np.float32),(100,100),lambda:None)
+        second=f.step(np.empty((0,5),np.float32),(100,100),lambda:None)
+        self.assertEqual(first[0][0],second[0][0])
+
+    def test_real_detection_releases_probation(self):
+        f=self.configure_probation(1);d=np.array([[10,10,20,20,.3]],np.float32)
+        first=f.step(d,(100,100),lambda:None);tid=first[0][0]
+        second=f.step(d,(100,100),lambda:None)
+        self.assertEqual(second[0][0],tid);self.assertEqual(f.meta[tid]['prov'],0)
+        third=f.step(np.empty((0,5),np.float32),(100,100),lambda:None)
+        self.assertEqual(third[0][0],tid);self.assertEqual(f.stats['weak_born'],1)
+
 
 if __name__=='__main__': unittest.main()
