@@ -89,7 +89,12 @@ def main():
                   seed=cfg['seed'],host=platform.node(),python_executable=sys.executable,python=sys.version,
                   versions={k:importlib.metadata.version(k) for k in ['torch','numpy','scipy','trackeval','motmetrics','lap']},
                   start_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),test_read=False,
-                  detector_seen_train=True,dataset=cell,groups=cfg['groups'],oracle=bool(rs['weak_birth'] and rs['weak_birth']['rule'].startswith('oracle')))
+                  detector_seen_train=cfg.get('detector_seen_train',True),
+                  detector_seen_scene=cfg.get('detector_seen_scene',True),
+                  previous_validation_exposure=cfg.get('previous_validation_exposure',True),
+                  protocol_id=cfg.get('protocol_id','X_epoch80_train36'),
+                  comparison_baseline=cfg.get('comparison_baseline','run_001'),
+                  dataset=cell,groups=cfg['groups'],oracle=bool(rs['weak_birth'] and rs['weak_birth']['rule'].startswith('oracle')))
     save(r/'manifest.yaml',manifest);save(r/'frozen_config.json',cfg)
     (r/'command.txt').write_text(shlex.join([sys.executable,*sys.argv])+'\n')
     stdout=open(r/'stdout.log','w',buffering=1);stderr=open(r/'stderr.log','w',buffering=1)
