@@ -52,6 +52,8 @@ def evaluate(root,cfg,tracks):
                     GT=int(c['CLR_TP']+c['CLR_FN']),motmetrics=ev.serialise_mot_row(mot))
     groups={};per={}
     for group,names in cfg['groups'].items():
+        if not names:
+            continue
         mt=ev.mm.metrics.create().compute_many([acc[n] for n in names],names=names,metrics=ev.MOT_FIELDS,generate_overall=True)
         combined={k:m.combine_sequences({n:raw[k][n] for n in names}) for k,m in metrics.items()}
         groups[group]=compact(combined['hota'],combined['clear'],combined['identity'],mt.loc['OVERALL'])

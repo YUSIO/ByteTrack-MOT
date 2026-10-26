@@ -204,7 +204,7 @@ class FCTrack:
             return []
         self.stats["birth_candidates"] += len(sel)
         final = tlwh.copy()
-        if b["rule"] in ("verifier", "oracle_regressed"):
+        if b["rule"] in ("verifier", "oracle_regressed", "learned"):
             p, reg = (self.verify_birth or self.verify)(image(), tlwh[sel])
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
@@ -213,6 +213,14 @@ class FCTrack:
                 if not b.get("use_regressed_box"):
                     raise ValueError("oracle_regressed requires the unchanged verifier regressed box")
                 ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            if b["rule"] == "learned":
+                from fctrack.weak_birth_gate import features, predict
+                if not b.get("use_regressed_box"):
+                    raise ValueError("learned gate requires unchanged verifier regressed boxes")
+                rc = iou_matrix(final[sel], taken).max(1) if len(taken) else np.zeros(len(sel))
+                x = features(det[sel,4], p, tlwh[sel], final[sel], cover[sel], rc)
+                acceptance = predict(b["model"], x)
+                ok = (acceptance >= b["threshold"]) & (final[sel,2] > 1) & (final[sel,3] > 1)
             if b is self.weak_birth and b.get("log_queries"):
                 for j,k in enumerate(sel):
                     overlap = float(iou_matrix(final[k], taken).max()) if len(taken) else 0.0
