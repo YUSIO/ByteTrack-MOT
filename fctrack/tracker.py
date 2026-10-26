@@ -77,6 +77,11 @@ class FCTrack:
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
         self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
         self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
+        self.weak_birth = cfg.get("weak_birth")  # Separate supplemental channel; never rescore BYTE input.
+        self.weak_birth_log = []
+        if self.weak_birth is not None:
+            if self.bth is None or not (0 <= self.weak_birth["lo"] < self.weak_birth["hi"] <= self.bth["lo"]):
+                raise ValueError("weak_birth must be disjoint from the existing birth score band")
 
     def step(self, det, shape, image):
         """det: n x 5 (x1, y1, x2, y2, score); image: callable returning the frame. Returns rows (id, tlwh, score)."""
@@ -119,6 +124,8 @@ class FCTrack:
             rows += self.claim(f, det, rows, image)
         if self.bth is not None:  # Exp109: immediate birth of uncovered detections decided by a rule (before relabel)
             rows += self.birth(f, det, rows, image)
+        if self.weak_birth is not None:
+            rows += self.supplement_weak_birth(f, det, rows, image)
         if self.filter is not None and not self.first_filter and rows:
             rows = self.hold_back(f, rows, image)
         if self.relab:
@@ -139,6 +146,9 @@ class FCTrack:
         for e in self.birth_log:  # Exp115: the id a born track carries after this step's relabel
             if "id" not in e:
                 e["id"] = e["t"].track_id
+        for e in self.weak_birth_log:
+            if "public_id" not in e:
+                e["public_id"] = e.pop("track").track_id
         if self.head is not None:  # pseudo-labels from the rows actually written in this frame
             written = [r for r in rows if r[1][2] * r[1][3] > 0]
             self.head.collect(f, det, written, lambda b: self.features.at((self.seq, f), image, b), iou_matrix)
@@ -147,6 +157,26 @@ class FCTrack:
                          rows=[dict(uid=trace.uid(t), track_id=tid, tlwh=box, score=score) for tid, box, score, t in rows])
             trace.finish()
         return [(tid, box, score) for tid, box, score, _ in rows]
+
+    def supplement_weak_birth(self, f, det, rows, image):
+        """Reuse birth activation after the original channel, before relabel.
+
+        Oracle uses only current GT for acceptance, never GT coordinates/IDs as outputs.
+        Ordinary association, recovery and strong births always run first.
+        """
+        original = self.bth
+        before = self.stats.copy()
+        self.bth = self.weak_birth
+        try:
+            added = self.birth(f, det, rows, image)
+        finally:
+            self.bth = original
+        for key in ("birth_candidates", "born", "birth_from_unconfirmed"):
+            self.stats["weak_" + key] += self.stats[key] - before[key]
+        for tid, box, score, track in added:
+            self.weak_birth_log.append({"frame": f, "initial_id": tid, "box": box.copy(),
+                                        "score": float(score), "track": track})
+        return added
 
     def birth(self, f, det, rows, image):
         """Exp109: an uncovered detection with score in [lo, hi) becomes a written, activated track in this frame when the
