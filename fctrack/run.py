@@ -81,7 +81,10 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             targs["gmc_warps"] = {int(r[0]): r[1:].reshape(2, 3) for r in w}
         tracker = BYTETracker(SimpleNamespace(**targs), frame_rate=info["frameRate"])
         BaseTrack._count = 0
-        fc = FCTrack(tracker, STrack, arm, verify, log=attempts_dir is not None)
+        seq_arm = dict(arm)
+        if arm.get("weak_observe_sequences") is not None and name not in arm["weak_observe_sequences"]:
+            seq_arm.pop("weak_birth", None)
+        fc = FCTrack(tracker, STrack, seq_arm, verify, log=attempts_dir is not None)
         if decisions_dir is not None:
             from fctrack.decision_trace import DecisionTrace
             fc.trace = tracker.decision_trace = DecisionTrace(decisions_dir / f"{name}.jsonl.gz")
@@ -150,6 +153,12 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
                 ",".join([q[0], str(q[1])] + [repr(float(v)) for v in q[2:]]) + "\n" for q in qlog))
         text = "".join(rows)
         (tracks / f"{name}.txt").write_text(text)
+        if fc.weak_query_log:
+            events = tracks.parent / "weak_queries"
+            events.mkdir(exist_ok=True)
+            (events / f"{name}.csv").write_text(
+                "frame,detection_index,score,x,y,w,h,p,rx,ry,rw,rh,proposal_cover,regressed_cover,p_accept\n" +
+                "".join(",".join(map(str,row))+"\n" for row in fc.weak_query_log))
         if arm.get("weak_birth"):
             events = tracks.parent / "weak_births"
             events.mkdir(exist_ok=True)

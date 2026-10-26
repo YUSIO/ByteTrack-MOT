@@ -97,6 +97,7 @@ def main():
     try:
         arm=dict(cfg['arm'])
         if rs['weak_birth']:arm['weak_birth']=rs['weak_birth']
+        if rs.get('weak_observe_sequences') is not None:arm['weak_observe_sequences']=rs['weak_observe_sequences']
         names,stats,digests=run_arm(root,cfg,cell,arm,r/'tracks','cpu',0)
         assert names==cell['sequences']
         save(r/'stats.json',stats);save(r/'tracks_sha256.json',digests)

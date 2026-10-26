@@ -79,6 +79,7 @@ class FCTrack:
         self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
         self.weak_birth = cfg.get("weak_birth")  # Separate supplemental channel; never rescore BYTE input.
         self.weak_birth_log = []
+        self.weak_query_log = []
         if self.weak_birth is not None:
             if self.bth is None or not (0 <= self.weak_birth["lo"] < self.weak_birth["hi"] <= self.bth["lo"]):
                 raise ValueError("weak_birth must be disjoint from the existing birth score band")
@@ -208,10 +209,17 @@ class FCTrack:
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            if b is self.weak_birth and b.get("log_queries"):
+                for j,k in enumerate(sel):
+                    overlap = float(iou_matrix(final[k], taken).max()) if len(taken) else 0.0
+                    self.weak_query_log.append([f,int(k),float(det[k,4]),*tlwh[k],float(p[j]),
+                                               *np.asarray(reg[j],float),float(cover[k]),overlap,int(ok[j])])
             if trace is not None:
                 trace.record("birth_verification", detection_indices=sel, proposals=tlwh[sel], p=p,
                              regressed=reg, final=final[sel], accepted=ok, p_min=b["p_min"])
             sel = sel[ok]
+            if b.get("observe_only"):
+                return []
         elif b["rule"] in ("policy", "all_logged"):
             # Exp115: every uncovered candidate >= lo is scored by the verifier; the written box is the regressed one (as
             # use_regressed_box). policy: born when a * logit(p) + b * logit(score) + tau >= 0; all_logged: all are born (value collection).

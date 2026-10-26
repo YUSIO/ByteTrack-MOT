@@ -61,5 +61,12 @@ class WeakBirthTests(unittest.TestCase):
         rows=f.step(d,(100,100),lambda:None)
         self.assertEqual(len(rows),1);np.testing.assert_array_equal(rows[0][1],[11,10,10,10])
 
+    def test_observation_is_non_mutating(self):
+        f=make('verifier');f.weak_birth.update(p_min=.97,use_regressed_box=True,log_queries=True,observe_only=True)
+        d=np.array([[10,10,20,20,.3]],np.float32)
+        self.assertEqual(f.step(d,(100,100),lambda:None),[])
+        self.assertEqual(f.stats['weak_born'],0);self.assertEqual(len(f.weak_query_log),1)
+        self.assertEqual(f.t.tracked_stracks,[])
+
 
 if __name__=='__main__': unittest.main()
