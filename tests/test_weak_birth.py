@@ -51,5 +51,15 @@ class WeakBirthTests(unittest.TestCase):
         a=f.step(d,(100,100),lambda:None);b=f.step(d,(100,100),lambda:None)
         self.assertEqual(a[0][0],b[0][0]);self.assertEqual(f.stats['weak_born'],1)
 
+    def test_deployable_verifier_ignores_gt_and_applies_threshold(self):
+        class NoGT(dict):
+            def get(self,*args): raise AssertionError('deployable birth read GT')
+        f=make('verifier');f.gt=NoGT();f.weak_birth['p_min']=.97
+        f.weak_birth['use_regressed_box']=True
+        f.verify=lambda im,b:(np.array([.98,.96]),b+np.array([1,0,0,0]))
+        d=np.array([[10,10,20,20,.3],[50,50,60,60,.4]],np.float32)
+        rows=f.step(d,(100,100),lambda:None)
+        self.assertEqual(len(rows),1);np.testing.assert_array_equal(rows[0][1],[11,10,10,10])
+
 
 if __name__=='__main__': unittest.main()

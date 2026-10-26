@@ -63,13 +63,17 @@ def evaluate(root,cfg,tracks):
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--root',type=Path,required=True)
     ap.add_argument('--experiment',default='experiments/exp179_weak_birth_train')
+    ap.add_argument('--config',default='configs/protocol.json')
     ap.add_argument('--run',required=True);a=ap.parse_args();root=a.root.resolve();e=root/a.experiment
-    cfg=json.loads((e/'configs/protocol.json').read_text());cell=cfg['cell'];rs=cfg['runs'][a.run]
+    config=e/a.config
+    cfg=json.loads(config.read_text());cell=cfg['cell'];rs=cfg['runs'][a.run]
     assert cell['split']=='train' and all(int(n[-2:])%2 for n in cell['sequences'])
     assert sorted(sum([cfg['groups'][k] for k in ['fit','calibration','dev']],[]))==sorted(cell['sequences'])
     assert cfg['device']=='cpu' and not git('status','--porcelain')
-    expected=json.loads((e/'preflight/source.json').read_text());assert git('rev-parse','HEAD')==expected['commit']
-    inputs=json.loads((e/'preflight/inputs.json').read_text())
+    source_record=e/cfg.get('source_record','preflight/source.json')
+    input_record=e/cfg.get('input_record','preflight/inputs.json')
+    expected=json.loads(source_record.read_text());assert git('rev-parse','HEAD')==expected['commit']
+    inputs=json.loads(input_record.read_text())
     for p,h in inputs.items(): assert sha(root/p)==h,p
     import cv2,numpy as np,torch
     random.seed(cfg['seed']);np.random.seed(cfg['seed']);torch.manual_seed(cfg['seed'])
@@ -80,7 +84,7 @@ def main():
     r=e/'results'/a.run;r.mkdir(parents=True,exist_ok=False)
     manifest=dict(status='running',phase='track_eval',run=a.run,name=rs['name'],source=expected,
                   private_repository=cfg['private_repository'],base_commit=cfg['base_commit'],dirty=False,
-                  config_sha256=sha(e/'configs/protocol.json'),input_manifest_sha256=sha(e/'preflight/inputs.json'),
+                  config_path=str(config.relative_to(root)),config_sha256=sha(config),input_manifest_sha256=sha(input_record),
                   input_files=len(inputs),script_sha256=sha(Path(__file__)),device='cpu',threads=1,
                   seed=cfg['seed'],host=platform.node(),python_executable=sys.executable,python=sys.version,
                   versions={k:importlib.metadata.version(k) for k in ['torch','numpy','scipy','trackeval','motmetrics','lap']},
