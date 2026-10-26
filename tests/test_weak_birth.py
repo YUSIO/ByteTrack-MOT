@@ -68,5 +68,13 @@ class WeakBirthTests(unittest.TestCase):
         self.assertEqual(f.stats['weak_born'],0);self.assertEqual(len(f.weak_query_log),1)
         self.assertEqual(f.t.tracked_stracks,[])
 
+    def test_regressed_oracle_keeps_model_box_ignores_p_and_not_gt_coordinates(self):
+        f=make('oracle_regressed');f.weak_birth.update(p_min=.97,use_regressed_box=True)
+        f.gt={1:np.array([[12,10,10,10]])}
+        f.verify=lambda im,b:(np.zeros(len(b)),np.array([[11.,10.,10.,10.]]))
+        rows=f.step(np.array([[0,0,5,5,.3]],np.float32),(100,100),lambda:None)
+        self.assertEqual(len(rows),1);np.testing.assert_array_equal(rows[0][1],[11,10,10,10])
+        self.assertAlmostEqual(rows[0][2],.3,places=6)
+
 
 if __name__=='__main__': unittest.main()

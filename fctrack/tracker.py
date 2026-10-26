@@ -204,11 +204,15 @@ class FCTrack:
             return []
         self.stats["birth_candidates"] += len(sel)
         final = tlwh.copy()
-        if b["rule"] == "verifier":
+        if b["rule"] in ("verifier", "oracle_regressed"):
             p, reg = (self.verify_birth or self.verify)(image(), tlwh[sel])
             if b.get("use_regressed_box"):  # Exp111: the same use of the verifier as the fill-in (write its regressed box)
                 final[sel] = np.asarray(reg, float)
             ok = (np.asarray(p) >= b["p_min"]) & (final[sel, 2] > 1) & (final[sel, 3] > 1)
+            if b["rule"] == "oracle_regressed":
+                if not b.get("use_regressed_box"):
+                    raise ValueError("oracle_regressed requires the unchanged verifier regressed box")
+                ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
             if b is self.weak_birth and b.get("log_queries"):
                 for j,k in enumerate(sel):
                     overlap = float(iou_matrix(final[k], taken).max()) if len(taken) else 0.0
@@ -232,7 +236,7 @@ class FCTrack:
                 ok &= (b["a"] * lg(pv) + b["b"] * lg(det[sel, 4].astype(float)) + b["tau"]) >= 0
             pmap = {int(k): float(q) for k, q in zip(sel, pv)}
             sel = sel[ok]
-        elif b["rule"] == "oracle":
+        if b["rule"] in ("oracle", "oracle_regressed"):
             g = self.gt.get(f, np.zeros((0, 4)))
             if len(g) and len(taken):
                 from scipy.optimize import linear_sum_assignment
@@ -242,7 +246,7 @@ class FCTrack:
             if not len(g):
                 return []
             from scipy.optimize import linear_sum_assignment
-            m = iou_matrix(tlwh[sel], g)
+            m = iou_matrix(final[sel], g)
             si, gi = linear_sum_assignment(-(m * (m >= 0.5)))
             sel = sel[[x for x, y in zip(si, gi) if m[x, y] >= 0.5]]
         added = []

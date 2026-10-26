@@ -89,7 +89,7 @@ def main():
                   seed=cfg['seed'],host=platform.node(),python_executable=sys.executable,python=sys.version,
                   versions={k:importlib.metadata.version(k) for k in ['torch','numpy','scipy','trackeval','motmetrics','lap']},
                   start_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),test_read=False,
-                  detector_seen_train=True,dataset=cell,groups=cfg['groups'],oracle=bool(rs['weak_birth'] and rs['weak_birth']['rule']=='oracle'))
+                  detector_seen_train=True,dataset=cell,groups=cfg['groups'],oracle=bool(rs['weak_birth'] and rs['weak_birth']['rule'].startswith('oracle')))
     save(r/'manifest.yaml',manifest);save(r/'frozen_config.json',cfg)
     (r/'command.txt').write_text(shlex.join([sys.executable,*sys.argv])+'\n')
     stdout=open(r/'stdout.log','w',buffering=1);stderr=open(r/'stderr.log','w',buffering=1)

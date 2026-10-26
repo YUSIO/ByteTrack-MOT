@@ -93,7 +93,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             fc.point_provider = VisualCorrespondence(arm["cotracker"], data / name, raw, device,
                                                      predictor=shared_predictor)
             shared_predictor = fc.point_provider.predictor
-        if any(arm.get(k, {}).get("rule") == "oracle" for k in ("birth", "weak_birth")):
+        if any(arm.get(k, {}).get("rule") in ("oracle", "oracle_regressed") for k in ("birth", "weak_birth")):
             g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
             g = g[g[:, 6] >= 1]
             fc.gt = {int(fr): g[g[:, 0] == fr][:, 2:6] for fr in np.unique(g[:, 0])}
