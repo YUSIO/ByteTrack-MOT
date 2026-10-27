@@ -36,7 +36,8 @@ def main():
     # A failed data gate must never create an optimizer or a training run.
     e=a.root/a.experiment;assert read(e/'results/run_006/metrics.json')['G0_passed']
     assert torch.cuda.is_available(),'registered training requires idle CUDA GPU1; no CPU fallback'
-    with Run(a.root,a.experiment,a.config,a.run,'temporal_birth_training') as run:
+    phase='temporal_birth_smoke' if read(e/a.config).get('smoke',False) else 'temporal_birth_training'
+    with Run(a.root,a.experiment,a.config,a.run,phase) as run:
         plan=run.cfg['plan'];tc=plan['training'];seed=tc['first_seed'];device=torch.device('cuda:0')
         torch.set_num_threads(1);random.seed(seed);np.random.seed(seed);torch.manual_seed(seed);torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark=False;torch.backends.cudnn.deterministic=True
@@ -48,6 +49,11 @@ def main():
         assert all(rows[i]['sequence'] in plan['data']['groups']['fit'] for i in train_ids)
         w=sampling_weights(train_rows);sampling_generator=torch.Generator().manual_seed(seed)
         count=tc['epochs']*tc['steps_per_epoch']*tc['batch_size'];sampled=torch.multinomial(torch.from_numpy(w),count,replacement=True,generator=sampling_generator).numpy();sampled=train_ids[sampled]
+        if run.cfg.get('smoke'):
+            positive=[i for i in train_ids if y[i]==1][:tc['batch_size']//2]
+            negative=[i for i in train_ids if y[i]==0][:tc['batch_size']//2]
+            assert len(positive)+len(negative)==tc['batch_size']
+            sampled=np.tile(positive+negative,tc['epochs']*tc['steps_per_epoch'])
         aug_rng=torch.Generator().manual_seed(seed+1000)
         model=TemporalBirth();original=load('seed',run.root/plan['data']['seed_weights'],torch.device('cpu'));model.body.load_state_dict(original.body.state_dict());del original
         model.to(device);body=list(model.body.parameters());other=[p for n,p in model.named_parameters() if not n.startswith('body.')]
@@ -63,7 +69,7 @@ def main():
             losses=[]
             for k in range(tc['steps_per_epoch']):
                 ids=sampled[step*tc['batch_size']:(step+1)*tc['batch_size']];step+=1
-                x=torch.from_numpy(images[ids].astype(np.float32)/255);m=torch.from_numpy(meta[ids]);x,m=augment(x,m,aug_rng)
+                x=torch.from_numpy(images[ids].astype(np.float32)/255);m=torch.from_numpy(meta[ids]);x,m=augment(x,m,aug_rng) if not run.cfg.get('smoke') else (x,m)
                 labels=torch.from_numpy(y[ids].astype(np.float32)).to(device)
                 opt.zero_grad(set_to_none=True);logits=model(x.to(device),m.to(device),a.arm)
                 loss=torch.nn.functional.binary_cross_entropy_with_logits(logits,labels)
@@ -73,6 +79,9 @@ def main():
             history.append(item);save(run.r/'history.json',history);writer.add_scalar('train/BCE',item['loss'],epoch+1);writer.add_scalar('train/body_frozen',int(frozen),epoch+1);writer.flush();print(json.dumps(item),flush=True)
         writer.close();assert step==tc['epochs']*tc['steps_per_epoch']
         torch.save(dict(state_dict=model.state_dict(),arm=a.arm,seed=seed,plan=plan,optimizer_steps=step),run.r/'model/final.pt')
+        if run.cfg.get('smoke'):
+            save(run.r/'metrics.json',dict(smoke=True,steps=step,loss=history[-1]['loss'],finite_loss_and_gradients=True,calibration_inference=False))
+            return
         model.eval();pred=np.empty(len(rows),float)
         with torch.inference_mode():
             for start in range(0,len(rows),tc['batch_size']):
