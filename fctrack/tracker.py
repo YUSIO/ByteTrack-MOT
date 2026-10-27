@@ -222,7 +222,8 @@ class FCTrack:
             if b["rule"] == "oracle_regressed":
                 if not b.get("use_regressed_box"):
                     raise ValueError("oracle_regressed requires the unchanged verifier regressed box")
-                ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
+                if not b.get("oracle_require_p", False):
+                    ok = (final[sel, 2] > 1) & (final[sel, 3] > 1)
             if b["rule"] == "learned":
                 from fctrack.weak_birth_gate import features, predict
                 if not b.get("use_regressed_box"):
