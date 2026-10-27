@@ -121,6 +121,8 @@ def activation_summary(model,raw,heat,residual,capture):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ['data-root','checkpoint','adapter','config','output']:p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--epoch',type=int,default=1)
+    p.add_argument('--source-run',default='run_002')
     args=p.parse_args();args.output.mkdir(parents=True,exist_ok=False)
     config=json.loads(args.config.read_text())
     assert sha256(args.checkpoint)==config['base_sha256']
@@ -130,7 +132,7 @@ def main():
     torch.backends.cudnn.benchmark=False;torch.backends.cudnn.deterministic=True
     torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
     write=lambda name,v:(args.output/name).write_text(json.dumps(v,indent=2,allow_nan=False)+'\n')
-    manifest=dict(phase='readonly_learning_diagnostic',status='running',optimizer_steps=0,source_run='run_002',
+    manifest=dict(phase='readonly_learning_diagnostic',status='running',optimizer_steps=0,source_run=args.source_run,epoch=args.epoch,
         started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),test_access=False,
         code_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),code_dirty=False,
         adapter_sha256=sha256(args.adapter),base_sha256=sha256(args.checkpoint),config_sha256=sha256(args.config),
@@ -140,9 +142,11 @@ def main():
     manifest['inputs']=verify_inputs(config,args.config,args.data_root,args.checkpoint,'pilot')
     write('manifest.json',manifest)
     model=FrozenTraDeS(args.checkpoint).cuda();initial={k:v.detach().cpu().clone() for k,v in model.adapter.state_dict().items()}
-    load_adapter(model,args.adapter,args.checkpoint);trained={k:v.detach().cpu().clone() for k,v in model.adapter.state_dict().items()}
+    metadata=load_adapter(model,args.adapter,args.checkpoint)
+    assert metadata['epoch']==args.epoch and args.epoch>=1
+    trained={k:v.detach().cpu().clone() for k,v in model.adapter.state_dict().items()}
     frozen=tensor_hashes(model.detector);adapter_hash=tensor_hashes(model.adapter)
-    write('parameter_changes.json',parameter_changes(model,initial,4625,config['lr'],config['momentum'],config['weight_decay']))
+    write('parameter_changes.json',parameter_changes(model,initial,4625*args.epoch,config['lr'],config['momentum'],config['weight_decay']))
     data=TrainPairs(args.data_root,config['fit_sequences']+config['dev_sequences'])
     indices={pair:i for i,pair in enumerate(data.index)}
     probes=[indices[name,max(2,int(info['seqlength'])//2)] for name,(_,info,_) in data.data.items()]
