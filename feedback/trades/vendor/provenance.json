@@ -1,0 +1,10 @@
+{
+  "upstream": "https://github.com/JialianW/TraDeS",
+  "commit": "0443c36c2ec716ade2fd2e9748deed1d36f172cd",
+  "license": "MIT",
+  "changes": [
+    "base_model.py: DCN import uses torchvision backend, unused relative utils import removed, np.reshape newshape keyword renamed shape.",
+    "image helpers and cost-volume label method extracted verbatim.",
+    "CVA/MFW/gamma/temporal softmax algebra retained; migration wrapper handles channel and residual bridge."
+  ]
+}
