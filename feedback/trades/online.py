@@ -15,8 +15,9 @@ def observed_history_xyxy(tracks):
 
 
 class TraDeSOnline:
-    def __init__(self, model, enabled=True):
+    def __init__(self, model, enabled=True, heat_shift=False):
         self.model=model.eval(); self.enabled=enabled
+        self.heat_shift=heat_shift
         self.model.detector.head.decode_in_inference=False
         observe_detector_boxes()
         self.reset('unset')
@@ -38,6 +39,9 @@ class TraDeSOnline:
         if self.geometry is not None and self.geometry!=geometry:
             raise ValueError('Geometry changed; reset required')
         heat=render_heat(self.history_boxes*ratio,self.model.input_size)[None].to(image)
+        if self.heat_shift:
+            # Fixed spatial-support intervention; features and chronology unchanged.
+            heat=heat.roll(heat.shape[-1]//2,dims=-1)
         result=self.model(image,previous_features=self.previous,heat=heat,enabled=self.enabled)
         head=self.model.detector.head
         raw=decode(result['output'].float().cpu(),head.hw,head.strides)
