@@ -34,7 +34,8 @@ def measure(rows,p,threshold):
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--root',type=Path,required=True);ap.add_argument('--experiment',default='experiments/exp192_temporal_birth_gate');ap.add_argument('--config',default='configs/stage2.json');ap.add_argument('--arm',choices=['S1','T3'],required=True);ap.add_argument('--run',required=True);a=ap.parse_args()
     # A failed data gate must never create an optimizer or a training run.
-    e=a.root/a.experiment;assert read(e/'results/run_006/metrics.json')['G0_passed']
+    e=a.root/a.experiment;collection=read(e/a.config).get('collection_run','run_006')
+    assert read(e/'results'/collection/'metrics.json')['G0_passed']
     assert torch.cuda.is_available(),'registered training requires idle CUDA GPU1; no CPU fallback'
     phase='temporal_birth_smoke' if read(e/a.config).get('smoke',False) else 'temporal_birth_training'
     with Run(a.root,a.experiment,a.config,a.run,phase) as run:
@@ -43,7 +44,7 @@ def main():
         torch.backends.cudnn.benchmark=False;torch.backends.cudnn.deterministic=True
         torch.use_deterministic_algorithms(True)
         run.manifest.update(arm=a.arm,seed=seed,device=str(device),physical_gpu_uuid=run.cfg['physical_gpu_uuid'],neural_weights_updated=True,calibration_read=True,checkpoint_selection='final_only',versions={'torch':torch.__version__,'numpy':np.__version__},gpu_name=torch.cuda.get_device_name(0))
-        rows=list(csv.DictReader((run.e/'results/run_006/samples.csv').open()));arrays=np.load(run.e/'results/run_006/samples.npz')
+        rows=list(csv.DictReader((run.e/'results'/collection/'samples.csv').open()));arrays=np.load(run.e/'results'/collection/'samples.npz')
         images=arrays['clips'];meta=arrays['metadata'];y=arrays['labels'];assert len(images)==len(rows)==len(y) and images.dtype==np.uint8
         train_ids=np.array([i for i,z in enumerate(rows) if z['group']=='fit' and int(z['label'])>=0]);train_rows=[rows[i] for i in train_ids]
         assert all(rows[i]['sequence'] in plan['data']['groups']['fit'] for i in train_ids)
