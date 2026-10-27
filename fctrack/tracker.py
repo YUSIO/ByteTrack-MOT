@@ -77,6 +77,12 @@ class FCTrack:
         self.birth_log = []              # Exp115: one record per born candidate (frame, score, verifier p, written box, track)
         self.verify_birth = None         # Exp123 diagnostic: a separate verifier for the birth decision (None = self.verify)
         self.log_birth_low = None        # Exp124: callable(img, tlwh) that only records uncovered candidates in [log_lo, lo) (no decision)
+        self.unified_birth = cfg.get("unified_birth")
+        self.unified_query_log, self.unified_birth_log = [], []
+        if self.unified_birth is not None:
+            if self.bth is not None or cfg.get("weak_birth") is not None or self.head is not None:
+                raise ValueError("unified gate cannot coexist with native supplemental birth/claim channels")
+            self.t.defer_birth_to_gate = True
         self.weak_birth = cfg.get("weak_birth")  # Separate supplemental channel; never rescore BYTE input.
         self.weak_birth_log = []
         self.weak_query_log = []
@@ -131,6 +137,9 @@ class FCTrack:
             self.snap = {f: self.snap[f]}
         if self.head is not None:  # Exp108: claim uncovered weak boxes with the in-sequence head (before relabel, so a claim is a birth)
             rows += self.claim(f, det, rows, image)
+        if self.unified_birth is not None:
+            from fctrack.unified_birth import apply_unified_birth
+            rows += apply_unified_birth(self, f, det, rows, image)
         if self.bth is not None:  # Exp109: immediate birth of uncovered detections decided by a rule (before relabel)
             rows += self.birth(f, det, rows, image)
         if self.weak_birth is not None:
@@ -155,6 +164,9 @@ class FCTrack:
         for e in self.birth_log:  # Exp115: the id a born track carries after this step's relabel
             if "id" not in e:
                 e["id"] = e["t"].track_id
+        for e in self.unified_birth_log:
+            if "public_id" not in e:
+                e["public_id"] = e.pop("track").track_id
         for e in self.weak_birth_log:
             if "public_id" not in e:
                 e["public_id"] = e.pop("track").track_id

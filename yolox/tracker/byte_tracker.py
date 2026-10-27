@@ -191,6 +191,9 @@ class BYTETracker(object):
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
         trace = getattr(self, "decision_trace", None)
+        defer_birth = getattr(self, "defer_birth_to_gate", False)
+        if defer_birth:
+            self.used_detection_indices = set()
         activated_starcks = []
         refind_stracks = []
         lost_stracks = []
@@ -216,8 +219,9 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
-        if trace is not None:
+        if trace is not None or defer_birth:
             high_indices, low_indices = np.flatnonzero(remain_inds), np.flatnonzero(inds_second)
+        if trace is not None:
             trace.record("detection_bands", boxes_xyxy=bboxes, scores=scores,
                          high_indices=high_indices, low_indices=low_indices,
                          ignored_indices=np.flatnonzero(~(remain_inds | inds_second)),
@@ -281,6 +285,8 @@ class BYTETracker(object):
                               matches, u_track, u_detection, self.args.match_thresh)
 
         for itracked, idet in matches:
+            if defer_birth:
+                self.used_detection_indices.add(int(high_indices[idet]))
             track = strack_pool[itracked]
             det = detections[idet]
             if track.state == TrackState.Tracked:
@@ -314,6 +320,8 @@ class BYTETracker(object):
             trace.association("association_low", r_tracked_stracks, detections_second, low_indices, dists,
                               matches, u_track, u_detection_second, 0.5)
         for itracked, idet in matches:
+            if defer_birth:
+                self.used_detection_indices.add(int(low_indices[idet]))
             track = r_tracked_stracks[itracked]
             det = detections_second[idet]
             if track.state == TrackState.Tracked:
@@ -330,7 +338,7 @@ class BYTETracker(object):
                 lost_stracks.append(track)
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
-        if trace is not None:
+        if trace is not None or defer_birth:
             remaining_high_indices = high_indices[list(u_detection)]
         detections = [detections[i] for i in u_detection]
         dists = matching.iou_distance(unconfirmed, detections)
@@ -341,6 +349,8 @@ class BYTETracker(object):
             trace.association("association_unconfirmed", unconfirmed, detections, remaining_high_indices, dists,
                               matches, u_unconfirmed, u_detection, 0.7)
         for itracked, idet in matches:
+            if defer_birth:
+                self.used_detection_indices.add(int(remaining_high_indices[idet]))
             unconfirmed[itracked].update(detections[idet], self.frame_id)
             activated_starcks.append(unconfirmed[itracked])
         for it in u_unconfirmed:
@@ -350,6 +360,10 @@ class BYTETracker(object):
 
         """ Step 4: Init new stracks"""
         for inew in u_detection:
+            if defer_birth:
+                if trace is not None:
+                    trace.record("byte_birth", detection_index=int(remaining_high_indices[inew]), decision="deferred_to_unified_gate")
+                continue
             track = detections[inew]
             if track.score < self.det_thresh:
                 if trace is not None:

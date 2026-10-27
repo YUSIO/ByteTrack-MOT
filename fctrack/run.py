@@ -93,7 +93,7 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             fc.point_provider = VisualCorrespondence(arm["cotracker"], data / name, raw, device,
                                                      predictor=shared_predictor)
             shared_predictor = fc.point_provider.predictor
-        if any(arm.get(k, {}).get("rule") in ("oracle", "oracle_regressed") for k in ("birth", "weak_birth")):
+        if any(arm.get(k, {}).get("rule") in ("oracle", "oracle_regressed") for k in ("birth", "weak_birth", "unified_birth")):
             g = np.loadtxt(data / name / "gt" / "gt.txt", delimiter=",", ndmin=2)
             g = g[g[:, 6] >= 1]
             fc.gt = {int(fr): g[g[:, 0] == fr][:, 2:6] for fr in np.unique(g[:, 0])}
@@ -166,6 +166,16 @@ def run_arm(root, cfg, cell, arm, tracks, device, limit, attempts_dir=None, quer
             (events / f"{name}.csv").write_text("frame,initial_id,public_id,score,x,y,w,h\n" + "".join(
                 ",".join(map(str, [e["frame"], e["initial_id"], e["public_id"], e["score"], *e["box"]])) + "\n"
                 for e in fc.weak_birth_log))
+        if arm.get("unified_birth"):
+            import csv
+            for folder, records in [("unified_queries", fc.unified_query_log), ("unified_births", fc.unified_birth_log)]:
+                event_dir = tracks.parent / folder
+                event_dir.mkdir(exist_ok=True)
+                with (event_dir / f"{name}.csv").open("w") as stream:
+                    columns = list(records[0]) if records else (["frame", "detection_index", "q"] if folder == "unified_queries" else ["frame", "detection_index", "initial_id", "public_id", "score"])
+                    writer = csv.DictWriter(stream, fieldnames=columns)
+                    writer.writeheader()
+                    writer.writerows(records)
         digests[name] = hashlib.sha256(text.encode()).hexdigest()
         if attempts_dir is not None:  # one row per verified fill-in attempt (read only: the tracks above are unchanged)
             (attempts_dir / f"{name}.csv").write_text(ATTEMPT_COLUMNS + "\n" + "".join(
