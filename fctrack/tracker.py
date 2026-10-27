@@ -100,6 +100,14 @@ class FCTrack:
             box = np.asarray(t._det if t.frame_id == f else t.tlwh, float)
             rows.append([t.track_id, box, t.score, t])  # the score keeps its dtype so that the written text matches the stored baseline
             if t.frame_id == f:
+                # Exp188: only a native high-score detector update licenses recovery.
+                # Object state survives relabel; a reused public ID grants no license.
+                if getattr(t, "_weak_recovery_pending", False) and t.score > self.t.args.track_thresh:
+                    t._weak_recovery_pending = False
+                    self.stats["weak_recovery_strong_confirmed"] += 1
+                    if trace is not None:
+                        trace.record("weak_recovery_confirmation", uid=trace.uid(t), track_id=t.track_id,
+                                     score=t.score, threshold=self.t.args.track_thresh)
                 cur[t.track_id] = box
                 if self.point_provider is not None:
                     # Only BYTETracker's detector-updated outputs are anchors. Recovery
@@ -175,6 +183,8 @@ class FCTrack:
         for key in ("birth_candidates", "born", "birth_from_unconfirmed"):
             self.stats["weak_" + key] += self.stats[key] - before[key]
         for tid, box, score, track in added:
+            if self.weak_birth.get("require_strong_detection_for_recovery", False):
+                track._weak_recovery_pending = True
             self.weak_birth_log.append({"frame": f, "initial_id": tid, "box": box.copy(),
                                         "score": float(score), "track": track})
         return added
@@ -370,6 +380,8 @@ class FCTrack:
                     reasons.append("missing_meta")
                 if not t.is_activated:
                     reasons.append("not_activated")
+                if getattr(t, "_weak_recovery_pending", False):
+                    reasons.append("weak_birth_needs_strong_detection")
                 if not 1 <= gap <= r["lookback"]:
                     reasons.append("gap_outside_lookback")
                 if m is not None:
@@ -384,6 +396,9 @@ class FCTrack:
                              eligible=not reasons, lookback=r["lookback"], max_since_real=r["max_since_real"],
                              min_observations=r["min_observations"])
             if m is None or not t.is_activated or not 1 <= gap <= r["lookback"] or f - m["real"] > r["max_since_real"] or m["obs"] < r["min_observations"]:
+                continue
+            if getattr(t, "_weak_recovery_pending", False):
+                self.stats["fill_in_skipped_weak_strong_confirmation"] += 1
                 continue
             if m.get("prov", 0) > 0:  # Exp111: provisional (verifier-born, not yet confirmed again by the detector)
                 self.stats["fill_in_skipped_probation"] += 1
