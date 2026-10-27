@@ -22,6 +22,17 @@ def rms(value):
     return float(value.detach().float().square().mean().sqrt())
 
 
+def foreground_mask(target,shape):
+    """P3 cells intersecting current GT boxes, for diagnostic summaries only."""
+    mask=torch.zeros(shape[-2:],device=target.device,dtype=torch.bool)
+    for _,cx,cy,w,h in target[0]:
+        if w<=0 or h<=0:continue
+        x1=max(0,int(torch.floor((cx-w/2)/8)));x2=min(shape[-1],int(torch.ceil((cx+w/2)/8)))
+        y1=max(0,int(torch.floor((cy-h/2)/8)));y2=min(shape[-2],int(torch.ceil((cy+h/2)/8)))
+        mask[y1:y2,x1:x2]=True
+    return mask
+
+
 def parameter_changes(model,initial,steps,lr,momentum,decay):
     # Counterfactual SGD movement if gradients are zero tensors, only L2 decay.
     scale=1.;velocity=0.
@@ -146,7 +157,7 @@ def main():
             model.detector.head.training=True
             off=float(model.detector.head(features,target,image)[0]);model.detector.head.training=False
         record=dict(sequence=name,frame=sample['frame'],partition='fit' if name in config['fit_sequences'] else 'dev',off_detection_loss=off,conditions={})
-        reference=None
+        reference=None;foreground=foreground_mask(target,raw.shape)
         for state,mode,variant in [('initial','train','on'),('initial','eval','on'),('trained','train','on'),
                                    ('trained','eval','on'),('trained','eval','support_zero'),
                                    ('trained','eval','heat_shift'),('trained','eval','previous_zero')]:
@@ -161,12 +172,19 @@ def main():
                 stats=dict(detection_loss=float(loss.detach()),cva_loss=float(aux.detach()),
                     correspondence=correspondence(cva,sample['cva']),
                     activations=activation_summary(model,raw,heat,residual,capture))
+                if foreground.any():
+                    stats['foreground']=dict(p3_cells=int(foreground.sum()),raw_rms=rms(raw[:,:,foreground]),
+                        residual_rms=rms(residual[:,:,foreground]),
+                        relative_residual_rms=rms(residual[:,:,foreground])/max(rms(raw[:,:,foreground]),1e-30))
                 if state=='trained' and variant=='on':stats['gradients']=gradients(model,loss,aux)
                 if state=='trained' and mode=='eval':
                     if variant=='on':reference=residual.detach().clone()
                     else:
                         stats['residual_change_rms']=rms(residual.detach()-reference)
                         stats['relative_residual_change']=stats['residual_change_rms']/max(rms(reference),1e-30)
+                        if foreground.any():
+                            stats['foreground']['residual_change_rms']=rms((residual.detach()-reference)[:,:,foreground])
+                            stats['foreground']['relative_residual_change']=stats['foreground']['residual_change_rms']/max(rms(reference[:,:,foreground]),1e-30)
                 record['conditions'][state+'_'+mode+'_'+variant]=stats
             finally:
                 for handle in handles:handle.remove()
