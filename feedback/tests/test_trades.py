@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from feedback.trades.model import FrozenTraDeS,TraDeSAdapter
 from feedback.trades.data import correspondence_targets,cva_loss,render_heat
 from feedback.trades.vendor.ops import DCN_TraDeS
-from feedback.trades.online import TraDeSOnline
+from feedback.trades.online import TraDeSOnline,observed_history_xyxy
 
 
 def official_loss_class():
@@ -116,6 +116,17 @@ class TraDeSTests(unittest.TestCase):
         with self.assertRaises(ValueError):runner.step(x,'synthetic',1,(64,96),1.)
         with self.assertRaises(ValueError):runner.step(x,'other',2,(64,96),1.)
         runner.reset('other');self.assertIsNone(runner.previous)
+
+    def test_tracker_xywh_to_history_xyxy_contract(self):
+        tracks=[SimpleNamespace(feedback_box=np.array([40.,24.,8.,12.]),score=.8),
+                SimpleNamespace(feedback_box=np.array([2.,2.,5.,5.]),score=.4)]
+        boxes=observed_history_xyxy(tracks)
+        np.testing.assert_array_equal(boxes,[[40,24,48,36]])
+        # Converter copies observations and preserves the actual width/height.
+        np.testing.assert_array_equal(tracks[0].feedback_box,[40,24,8,12])
+        heat=render_heat(boxes,(64,96))
+        self.assertGreater(heat[0,3,5],0)
+        self.assertEqual(observed_history_xyxy([]).shape,(0,4))
 
 
 if __name__=='__main__':unittest.main()

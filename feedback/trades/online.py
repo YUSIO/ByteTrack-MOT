@@ -7,6 +7,13 @@ from feedback.state import observe_detector_boxes
 from .data import render_heat
 
 
+def observed_history_xyxy(tracks):
+    """Observation hook stores xywh, rasterizer consumes xyxy; never use KF boxes."""
+    boxes=np.asarray([t.feedback_box for t in tracks if t.score>=.5],np.float32).reshape(-1,4)
+    boxes[:,2:]+=boxes[:,:2]
+    return boxes
+
+
 class TraDeSOnline:
     def __init__(self, model, enabled=True):
         self.model=model.eval(); self.enabled=enabled
@@ -50,8 +57,7 @@ class TraDeSOnline:
         finally:
             BaseTrack._count=counter
         # Use only current confirmed matched detector boxes, no KF-only extrapolation.
-        self.history_boxes=np.asarray([t.feedback_box for t in tracks if t.score>=.5],
-                                      np.float32).reshape(-1,4)
+        self.history_boxes=observed_history_xyxy(tracks)
         self.previous=result['raw_feature'].detach()
         self.geometry=geometry;self.frame=frame
         return dict(detections=detections,

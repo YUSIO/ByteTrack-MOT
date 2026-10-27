@@ -84,6 +84,7 @@ def main():
         history.append(dict(step=step,frame=sample['frame'],detection_loss=float(detection.detach()),
             cva_loss=float(auxiliary.detach()),total_loss=float(loss.detach()),
             pairs=sample['pair_stats'],gradient_l1=gradients))
+        (args.output/'update_evidence.json').write_text(json.dumps(history,indent=2)+'\n')
         print(json.dumps({k:v for k,v in history[-1].items() if k!='gradient_l1'}),flush=True)
         del result,auxiliary,detection,loss
     model.eval()
@@ -121,6 +122,7 @@ def main():
         image,ratio,shape=read_image(path,frame,info,(800,1440))
         r=enabled.step(image[None],sequence,frame,shape,ratio)
         online.append(dict(frame=frame,feedback_used=r['feedback_used'],history_frame=r['history_frame']))
+    (args.output/'online_evidence.json').write_text(json.dumps(online,indent=2)+'\n')
     assert not online[0]['feedback_used'] and any(r['feedback_used'] for r in online[1:])
     assert tensor_hashes(model.detector)==frozen
     assert input_hashes=={str(p):sha256(p) for p in paths}
