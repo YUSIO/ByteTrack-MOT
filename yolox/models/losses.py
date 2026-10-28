@@ -8,10 +8,13 @@ import torch.nn.functional as F
 
 
 class IOUloss(nn.Module):
-    def __init__(self, reduction="none", loss_type="iou"):
+    def __init__(self, reduction="none", loss_type="iou", iou_alpha=2):
         super(IOUloss, self).__init__()
         self.reduction = reduction
         self.loss_type = loss_type
+        if iou_alpha <= 0:
+            raise ValueError("iou_alpha must be positive")
+        self.iou_alpha = iou_alpha
 
     def forward(self, pred, target):
         assert pred.shape[0] == target.shape[0]
@@ -33,7 +36,7 @@ class IOUloss(nn.Module):
         iou = (area_i) / (area_p + area_g - area_i + 1e-16)
 
         if self.loss_type == "iou":
-            loss = 1 - iou ** 2
+            loss = 1 - iou ** self.iou_alpha
         elif self.loss_type == "giou":
             c_tl = torch.min(
                 (pred[:, :2] - pred[:, 2:] / 2), (target[:, :2] - target[:, 2:] / 2)
