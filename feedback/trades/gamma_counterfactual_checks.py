@@ -15,6 +15,7 @@ class Checks(unittest.TestCase):
         opt=SimpleNamespace(head_kernel=3,trades=True,output_h=8,output_w=10,
                             deform_kernel_size=3,device='cpu',clip_len=2)
         self.core=BaseModel({}, {}, 1, 64, opt).eval()
+        self.core.opt=opt  # Same wrapper initialization as TraDeSAdapter.
         self.current=torch.randn(1,64,8,10)
         self.previous=torch.randn_like(self.current)
         self.d=torch.randn(1,2,8,10)
