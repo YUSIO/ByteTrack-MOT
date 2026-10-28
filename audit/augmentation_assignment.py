@@ -169,7 +169,7 @@ def make_dataset(root):
     return exp,exp.get_data_loader(batch_size=4,is_distributed=False).dataset
 
 def save_preview(out,image,labels,case,events):
-    rgb=np.clip((image.transpose(1,2,0)*STD+MEAN)*255,0,255).astype(np.uint8)
+    rgb=np.ascontiguousarray(np.clip((image.transpose(1,2,0)*STD+MEAN)*255,0,255).astype(np.uint8))
     for row in labels[labels[:,5]>0]:
         c=row[1:3];wh=row[3:5];a=(c-wh/2).astype(int);b=(c+wh/2).astype(int)
         cv2.rectangle(rgb,tuple(a),tuple(b),(50,230,90),1)
