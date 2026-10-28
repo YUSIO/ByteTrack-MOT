@@ -147,6 +147,9 @@ def run(args, cfg, manifest):
     assert metadata['epoch'] == 10 and model.adapter.fusion_mode == 'visual_only'
     before = tensor_hashes(model)
     core = model.adapter.core
+    # Adapter.forward normally sets this non-buffer device before calling CVA.
+    # This diagnostic calls the core directly to capture native intermediates.
+    core.opt.device = next(model.parameters()).device
     bias = core.dcn1_1.bias[None, :, None, None]
     weight = core.dcn1_1.weight.reshape(64,64,9).permute(2,0,1)
     kernel = torch.tensor([(x-1,y-1) for y in range(3) for x in range(3)], device='cuda')

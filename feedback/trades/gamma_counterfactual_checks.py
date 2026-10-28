@@ -1,5 +1,6 @@
 """Bounded algebra and sampler checks; synthetic inputs, no dataset access."""
 from types import SimpleNamespace
+import os
 import unittest
 import torch
 from .gamma_counterfactual import split_offsets
@@ -55,6 +56,17 @@ class Checks(unittest.TestCase):
         actual=op(field,offset,mask)
         self.assertAlmostEqual(float(actual[0,0,3,4]),float(field[0,0,4,6])+.5)
         torch.testing.assert_close(op(field*0,offset,mask)-op.bias[None,:,None,None],field*0,atol=0,rtol=0)
+
+    @unittest.skipUnless(os.environ.get('MOT_GAMMA_CUDA_SMOKE')=='1','Explicit idle-GPU smoke only')
+    def test_direct_core_cuda_device(self):
+        self.assertEqual(os.environ.get('CUDA_VISIBLE_DEVICES'),'GPU-743a7bc5-49b1-091e-efe7-fd88ae1b9b9f')
+        core=self.core.cuda()
+        core.opt.device=next(core.parameters()).device
+        cur,prev=self.current.cuda(),self.previous.cuda()
+        with torch.no_grad():
+            output=core.CVA_MFW([cur,prev],[prev*.5],visual_only=True)
+        self.assertTrue(output[2].is_cuda)
+        self.assertTrue(torch.isfinite(output[0][0]).all())
 
 
 if __name__=='__main__':unittest.main()
