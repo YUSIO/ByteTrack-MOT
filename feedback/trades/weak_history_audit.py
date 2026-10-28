@@ -32,7 +32,11 @@ from .vendor.image import gaussian_radius, draw_umich_gaussian
 
 
 def dump(path, obj):
-    path.write_text(json.dumps(obj, indent=2, allow_nan=False)+'\n')
+    def scalar(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(f'Unsupported JSON value: {type(value).__name__}')
+    path.write_text(json.dumps(obj, indent=2, allow_nan=False, default=scalar)+'\n')
 
 
 def ious(box, boxes):

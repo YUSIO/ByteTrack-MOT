@@ -1,13 +1,22 @@
 """Independent numerical checks for frozen source attribution."""
 import unittest
+import tempfile
+import json
+from pathlib import Path
 import numpy as np
 import torch
 from feedback.trades.model import TraDeSAdapter
 from feedback.trades.data import render_heat
-from feedback.trades.weak_history_audit import source_partition, native_capture, delete_source, sample, score_frame
+from feedback.trades.weak_history_audit import source_partition, native_capture, delete_source, sample, score_frame, dump
 
 
 class WeakHistoryAuditTest(unittest.TestCase):
+    def test_numpy_scalar_record_serialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'row.json'
+            dump(path,dict(p3_query=[np.int64(3),np.int64(4)],score=np.float32(.5)))
+            self.assertEqual(json.loads(path.read_text()),dict(p3_query=[3,4],score=.5))
+
     def test_max_heat_partition_and_duplicate_ties(self):
         boxes=np.array([[8,8,32,32],[16,16,40,40],[8,8,32,32]],np.float32)
         parts,ties=source_partition(boxes,1.,(64,64))
