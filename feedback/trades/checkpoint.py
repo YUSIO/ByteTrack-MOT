@@ -17,7 +17,7 @@ def save_adapter(model,path,base_checkpoint,metadata):
     if path.exists():
         raise FileExistsError(path)
     torch.save(dict(adapter=model.adapter.state_dict(),architecture=model.architecture,
-                    input_size=model.input_size,base_sha256=sha256(base_checkpoint),
+                    input_size=model.input_size,base_sha256=sha256(base_checkpoint),fusion_mode=model.adapter.fusion_mode,
                     metadata=metadata),path)
 
 
@@ -27,5 +27,8 @@ def load_adapter(model,path,base_checkpoint):
         raise ValueError('Frozen detector checkpoint hash mismatch')
     if state['architecture']!=model.architecture or tuple(state['input_size'])!=model.input_size:
         raise ValueError('Adapter architecture/geometry mismatch')
+    mode=state.get('fusion_mode','full')
+    if mode not in ('full','visual_only'):raise ValueError('Unknown checkpoint fusion mode')
     model.adapter.load_state_dict(state['adapter'],strict=True)
+    model.adapter.fusion_mode=mode
     return state['metadata']

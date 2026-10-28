@@ -225,7 +225,7 @@ class BaseModel(nn.Module):
 
         return self.CVA_MFW(feat_list, support_feats)
 
-    def CVA_MFW(self, feat_list, support_feats):
+    def CVA_MFW(self, feat_list, support_feats, visual_only=False):
         prop_feats = []
         attentions = []
         h_max_for_loss_aux = []
@@ -267,8 +267,15 @@ class BaseModel(nn.Module):
         adaptive_weights = torch.split(adaptive_weights, 1, dim=1)  # 3*(B,1,H,W)
         # feature aggregation (MFW)
         enhanced_feat = 0
-        for i in range(len(adaptive_weights)):
-            enhanced_feat += adaptive_weights[i] * prop_feats[i]
+        if visual_only:
+            # Keep native learned attention, but inject only visual DCN content.
+            # DCN bias can still influence attention; it has no direct residual path.
+            bias = self.dcn1_1.bias[None, :, None, None]
+            for i in range(1, len(adaptive_weights)):
+                enhanced_feat = enhanced_feat + adaptive_weights[i] * (prop_feats[i] - bias)
+        else:
+            for i in range(len(adaptive_weights)):
+                enhanced_feat += adaptive_weights[i] * prop_feats[i]
 
         return [enhanced_feat], embedding, tracking_offset_output, [h_max_for_loss, w_max_for_loss], h_max_for_loss_aux, w_max_for_loss_aux
 

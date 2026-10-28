@@ -19,6 +19,7 @@ class TraDeSAdapter(nn.Module):
         self.core = BaseModel({}, {}, 1, 64, opt)
         self.core.opt = opt
         self.output = nn.Conv2d(64, channels, 1, bias=False)
+        self.fusion_mode = 'full'
         nn.init.zeros_(self.output.weight)
 
     def forward(self, current, previous=None, heat=None, enabled=True):
@@ -40,8 +41,11 @@ class TraDeSAdapter(nn.Module):
         cur = self.input(current[active].detach())
         prev = self.input(previous[active].detach())
         self.core.opt.device = current.device
-        outputs = self.core.CVA_MFW([cur, prev], [prev * heat[active].detach()])
-        delta = self.output(outputs[0][0] - cur)
+        if self.fusion_mode not in ('full', 'visual_only'):
+            raise ValueError('Unknown fusion mode')
+        visual_only = self.fusion_mode == 'visual_only'
+        outputs = self.core.CVA_MFW([cur, prev], [prev * heat[active].detach()], visual_only=visual_only)
+        delta = self.output(outputs[0][0] if visual_only else outputs[0][0] - cur)
         result = current.clone()
         result[active] = current[active] + delta
         cva = {'h': outputs[3][0], 'w': outputs[3][1], 'active': active,
