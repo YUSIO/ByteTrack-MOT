@@ -20,14 +20,23 @@ trainer = Trainer(exp,args)
 trainer.before_train()
 assert trainer.model.head.iou_loss.loss_type == "diou"
 trainer.epoch = 0
-for i in range(3):
+successful_steps = 0
+for i in range(20):
     trainer.iter = i
+    scale_before = trainer.scaler.get_scale()
     trainer.train_one_iter()
     values = {k:float(v.latest) for k,v in trainer.meter.get_filtered_meter('loss').items()}
     assert values and all(torch.isfinite(torch.tensor(x)) for x in values.values()), values
-    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in trainer.model.parameters())
+    finite_gradients = all(p.grad is None or torch.isfinite(p.grad).all() for p in trainer.model.parameters())
+    scale_after = trainer.scaler.get_scale()
+    assert finite_gradients or scale_after < scale_before, "nonfinite gradients without AMP skip"
+    assert all(torch.isfinite(p).all() for p in trainer.model.parameters())
+    successful_steps += int(finite_gradients)
+    values.update(finite_gradients=bool(finite_gradients), scale_before=scale_before, scale_after=scale_after)
     steps.append(values)
     print(json.dumps({'step':i,'losses':values}),flush=True)
+    if successful_steps == 3: break
+assert successful_steps == 3, "AMP failed to reach three finite-gradient steps"
 torch.cuda.synchronize()
 result = {'batch':batch,'input_size':exp.input_size,'max_memory_allocated':torch.cuda.max_memory_allocated(),'max_memory_reserved':torch.cuda.max_memory_reserved(),'status':'passed','optimizer_steps':3,'losses':steps,'cudnn_benchmark':True,'cudnn_deterministic':True}
 (root/'preflight'/f'batch{batch}_result.json').write_text(json.dumps(result,indent=2)+'\n')
