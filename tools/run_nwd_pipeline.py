@@ -8,7 +8,8 @@ CODE=BASE/'worktrees/bytetrack-exp198-nwd'
 DATA=BASE/'datasets/UAVSwarm-dataset-master'
 PY=BASE/'.venv/bin/python'
 EXP='exps/example/uavswarm/yolox_x_uavswarmv1_nwd.py'
-SHA=json.loads((ROOT/'configs/protocol_v1.json').read_text())['code_commit']
+PROTOCOL=ROOT/'configs/protocol_v2.json'
+SHA=json.loads(PROTOCOL.read_text())['code_commit']
 WEIGHTS=BASE/'experiments/exp141_bytetrack_yolox_x_uavswarmv1/pretrained/yolox_x.pth'
 GPU='1'
 GPU_UUID='GPU-743a7bc5-49b1-091e-efe7-fd88ae1b9b9f'
@@ -22,7 +23,7 @@ def manifest(run,m):write(run/'manifest.yaml',m) # JSON is valid YAML.
 def phase(name,kind,cmd,parent=None,extra=None):
  run=ROOT/'results'/name;run.mkdir(parents=True,exist_ok=False)
  assert git('rev-parse','HEAD')==SHA and not git('status','--porcelain')
- m={'run_id':name,'phase':kind,'status':'running','canonical_run':name,'parent_run':parent,'started_utc':now(),'private_repository':'git@github.com:YUSIO/ByteTrack-MOT.git','branch':'exp/198-yolox-x-nwd','code_commit':SHA,'code_dirty':False,'base_commit':'ee7b677cc25c8070f45ce89bf63b532089dc7655','upstream_commit':'d1bf0191adff59bc8fcfeaa0b33d3d1642552a99','python_executable':str(PY),'python_version':sys.version,'torch':torch.__version__,'torchvision':torchvision.__version__,'numpy':numpy.__version__,'opencv':cv2.__version__,'cuda':torch.version.cuda,'host':platform.node(),'physical_gpu_uuid':GPU_UUID,'physical_gpu_index':1,'visible_gpu_index':0,'seed':0,'dataset':'UAVSwarm V1','dataset_root':str(DATA),'config_path':EXP,'config_sha256':digest(CODE/EXP),'command':cmd,'environment':{k:os.environ[k] for k in ('CUDA_VISIBLE_DEVICES','PYTHONPATH','UAVSWARM_V1_ROOT')},'input_hashes':{str(p):digest(p) for p in [ROOT/'configs/protocol_v1.json',CODE/EXP,CODE/'tools/run_nwd_pipeline.py',CODE/'tools/preflight_nwd.py',BASE/'experiments/exp141_bytetrack_yolox_x_uavswarmv1/code/evaluate_cache.py']},'artifact_recovery':'pending','visualization':'waived; not requested',**(extra or {})}
+ m={'run_id':name,'phase':kind,'status':'running','canonical_run':name,'parent_run':parent,'started_utc':now(),'private_repository':'git@github.com:YUSIO/ByteTrack-MOT.git','branch':'exp/198-yolox-x-nwd','code_commit':SHA,'code_dirty':False,'base_commit':'ee7b677cc25c8070f45ce89bf63b532089dc7655','upstream_commit':'d1bf0191adff59bc8fcfeaa0b33d3d1642552a99','python_executable':str(PY),'python_version':sys.version,'torch':torch.__version__,'torchvision':torchvision.__version__,'numpy':numpy.__version__,'opencv':cv2.__version__,'cuda':torch.version.cuda,'host':platform.node(),'physical_gpu_uuid':GPU_UUID,'physical_gpu_index':1,'visible_gpu_index':0,'seed':0,'dataset':'UAVSwarm V1','dataset_root':str(DATA),'config_path':EXP,'config_sha256':digest(CODE/EXP),'command':cmd,'environment':{k:os.environ[k] for k in ('CUDA_VISIBLE_DEVICES','PYTHONPATH','UAVSWARM_V1_ROOT')},'input_hashes':{str(p):digest(p) for p in [PROTOCOL,CODE/EXP,CODE/'tools/run_nwd_pipeline.py',CODE/'tools/preflight_nwd.py',BASE/'experiments/exp141_bytetrack_yolox_x_uavswarmv1/code/evaluate_cache.py']},'preflight_evidence':json.loads(PROTOCOL.read_text())['preflight_dir'],'artifact_recovery':'pending','visualization':'waived; not requested',**(extra or {})}
  manifest(run,m)
  (run/'command.txt').write_text('cd '+shlex.quote(str(CODE))+'\n'+shlex.join(['env',*[k+'='+v for k,v in m['environment'].items()],*cmd])+'\n')
  (run/'gpu.txt').write_text(subprocess.check_output(['nvidia-smi','-i',GPU,'--query-gpu=index,uuid,name,memory.total,driver_version','--format=csv,noheader'],text=True))
@@ -38,13 +39,15 @@ def hash_outputs(run):
  (run/'output_checksums.sha256').write_text(''.join(f'{digest(p)}  {p.relative_to(run)}\n' for p in paths))
 
 def main():
- batch=int(sys.argv[1]);protocol=json.loads((ROOT/'configs/protocol_v1.json').read_text())
+ batch=int(sys.argv[1]);protocol=json.loads(PROTOCOL.read_text())
+ preflight=ROOT/protocol['preflight_dir']
  assert protocol['batch']==batch and protocol['code_commit']==SHA
  assert digest(WEIGHTS)==protocol['pretrained_sha256']
- assert digest(ROOT/'preflight/train_files.sha256')==protocol['train_files_manifest_sha256']
- assert json.loads((ROOT/'preflight/cpu_check.json').read_text())['status']=='passed'
+ assert digest(preflight/'train_files.sha256')==protocol['train_files_manifest_sha256']
+ assert json.loads((preflight/'cpu_check.json').read_text())['status']=='passed'
  assert digest(DATA/'annotations/train.json')==protocol['train_json_sha256']
- assert json.loads((ROOT/'preflight'/f'batch{batch}_result.json').read_text())['status']=='passed'
+ probe=json.loads((preflight/f'batch{batch}_result.json').read_text())
+ assert probe['status']=='passed' and probe['code_commit']==SHA and probe['consecutive_finite_optimizer_steps']>=3
  assert not (ROOT/'results/run_001').exists()
  processes=subprocess.check_output(['nvidia-smi','-i',GPU,'--query-compute-apps=pid','--format=csv,noheader'],text=True).strip()
  assert not processes, f'GPU{GPU} occupied: {processes}'
@@ -53,7 +56,7 @@ def main():
  os.environ.update(CUDA_VISIBLE_DEVICES=GPU,PYTHONPATH=str(CODE),UAVSWARM_V1_ROOT=str(DATA))
  train=ROOT/'results/run_001'
  cmd=[str(PY),'tools/train.py','-f',EXP,'-d','1','-b',str(batch),'--fp16','-c',str(WEIGHTS),'-expn','run_001','output_dir',str(train/'model')]
- run,m=phase('run_001','train',cmd,extra={'nwd_constant':12.8,'regression_loss':'1-exp(-L2(dx,dy,dw/2,dh/2)/12.8)','blend_with_iou':False,'regression_compute_dtype':'float32','regression_coordinate_units':'augmented_model_input_pixels','regression_weight':5.0,'batch':batch,'base_lr':.001/64*batch,'epochs':80,'selection':'fixed_final_epoch_80_EMA','validation_split':None,'evaluation_during_training':'train_set_monitoring_only','pretrained_sha256':digest(WEIGHTS),'train_json_sha256':digest(DATA/'annotations/train.json'),'train_files_manifest_sha256':digest(ROOT/'preflight/train_files.sha256'),'train_images':6844,'train_boxes':49661})
+ run,m=phase('run_001','train',cmd,extra={'nwd_constant':12.8,'regression_loss':'1-exp(-L2(dx,dy,dw/2,dh/2)/12.8)','blend_with_iou':False,'regression_compute_dtype':'float32','regression_coordinate_units':'augmented_model_input_pixels','regression_weight':5.0,'batch':batch,'base_lr':.001/64*batch,'epochs':80,'selection':'fixed_final_epoch_80_EMA','validation_split':None,'evaluation_during_training':'train_set_monitoring_only','pretrained_sha256':digest(WEIGHTS),'train_json_sha256':digest(DATA/'annotations/train.json'),'train_files_manifest_sha256':digest(preflight/'train_files.sha256'),'train_images':6844,'train_boxes':49661})
  ckpt=run/'model/run_001/latest_ckpt.pth.tar'
  state=torch.load(ckpt,map_location='cpu',weights_only=True)
  assert state['start_epoch']==80,state['start_epoch']
