@@ -19,6 +19,8 @@ class IOUloss(nn.Module):
     def forward(self, pred, target):
         assert pred.shape[0] == target.shape[0]
 
+        if self.loss_type == "diou":
+            pred, target = pred.float(), target.float()
         pred = pred.view(-1, 4)
         target = target.view(-1, 4)
         tl = torch.max(
@@ -37,6 +39,14 @@ class IOUloss(nn.Module):
 
         if self.loss_type == "iou":
             loss = 1 - iou ** self.iou_alpha
+        elif self.loss_type == "diou":
+            c_tl = torch.min(pred[:, :2] - pred[:, 2:] / 2,
+                             target[:, :2] - target[:, 2:] / 2)
+            c_br = torch.max(pred[:, :2] + pred[:, 2:] / 2,
+                             target[:, :2] + target[:, 2:] / 2)
+            diagonal_sq = ((c_br - c_tl) ** 2).sum(dim=1).clamp(min=1e-16)
+            center_sq = ((pred[:, :2] - target[:, :2]) ** 2).sum(dim=1)
+            loss = 1 - iou + center_sq / diagonal_sq
         elif self.loss_type == "giou":
             c_tl = torch.min(
                 (pred[:, :2] - pred[:, 2:] / 2), (target[:, :2] - target[:, 2:] / 2)
