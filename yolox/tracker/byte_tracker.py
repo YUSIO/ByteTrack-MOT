@@ -267,6 +267,8 @@ class BYTETracker(object):
             dists = homa.cost(strack_pool, detections)
         elif first_stage_cost == 'iou':
             dists = matching.iou_distance(strack_pool, detections)
+        elif first_stage_cost == 'nwd':
+            dists = matching.nwd_distance(strack_pool, detections, self.args.nwd_scale)
         elif first_stage_cost == 'm2da':
             for track in strack_pool:
                 track.record_prediction(self.args.m2da_window - 1)
@@ -308,7 +310,9 @@ class BYTETracker(object):
                          tracks=[dict(track=trace.track(strack_pool[i]), eligible=strack_pool[i] in eligible_objects,
                                       reason="eligible" if strack_pool[i] in eligible_objects else "state_or_lost_age",
                                       age=self.frame_id - strack_pool[i].end_frame) for i in u_track])
-        dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        dists = (matching.nwd_distance(r_tracked_stracks, detections_second, self.args.nwd_scale)
+                 if getattr(self.args, 'low_stage_nwd', False)
+                 else matching.iou_distance(r_tracked_stracks, detections_second))
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         if trace is not None:
             trace.association("association_low", r_tracked_stracks, detections_second, low_indices, dists,
@@ -333,7 +337,9 @@ class BYTETracker(object):
         if trace is not None:
             remaining_high_indices = high_indices[list(u_detection)]
         detections = [detections[i] for i in u_detection]
-        dists = matching.iou_distance(unconfirmed, detections)
+        dists = (matching.nwd_distance(unconfirmed, detections, self.args.nwd_scale)
+                 if getattr(self.args, 'unconfirmed_stage_nwd', False)
+                 else matching.iou_distance(unconfirmed, detections))
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)

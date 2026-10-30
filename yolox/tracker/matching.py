@@ -90,6 +90,21 @@ def iou_distance(atracks, btracks):
 
     return cost_matrix
 
+def nwd_distance(atracks, btracks, scale):
+    """NWD cost for tlbr boxes in original image pixels."""
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("NWD scale must be finite and positive")
+    if not len(atracks) or not len(btracks):
+        return np.zeros((len(atracks), len(btracks)), dtype=float)
+    def vectors(items):
+        boxes = np.asarray([x if isinstance(x, np.ndarray) else x.tlbr for x in items], dtype=float)
+        wh = boxes[:, 2:4] - boxes[:, 0:2]
+        if not np.isfinite(boxes).all() or np.any(wh <= 0):
+            raise ValueError("NWD requires finite, positive-size boxes")
+        return np.concatenate((boxes[:, 0:2] + wh / 2, wh / 2), axis=1)
+    delta = vectors(atracks)[:, None, :] - vectors(btracks)[None, :, :]
+    return -np.expm1(-np.linalg.norm(delta, axis=2) / scale)
+
 def v_iou_distance(atracks, btracks):
     """
     Compute cost based on IoU
